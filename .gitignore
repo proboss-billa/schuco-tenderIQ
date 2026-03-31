@@ -2,3 +2,16 @@
 .idea/*
 .venv/*
 uploads/*
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Node / Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/package-lock.json
+
+# Claude
+.claude/
