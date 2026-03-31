@@ -16,10 +16,6 @@ from google.genai.errors import ClientError
 
 from processing.document_processor import logger
 
-# Initialize client
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-
-
 class ParameterExtractor:
     """Extract facade parameters using LLM"""
 
@@ -28,6 +24,7 @@ class ParameterExtractor:
         self.embedder = embedding_client
         self.llm = llm_client
         self.db = db_session
+        self.gemini = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
     @retry(
         stop=stop_after_attempt(5),
@@ -39,27 +36,33 @@ class ParameterExtractor:
         system_instr = "You are an expert extracting technical parameters from facade/curtain wall specifications."
 
         prompt = f"""
-    **Parameter to Extract:**
-    - Name: {param_config['display_name']}
-    - Description: {param_config['description']}
-    - Expected Units: {', '.join(param_config['expected_units'])}
-    - Value Type: {param_config['value_type']}
+Extract the following parameter from the document context below.
 
-    **Context from Documents:**
-    {context}
+**Parameter:** {param_config['display_name']}
+**Description:** {param_config['description']}
+**Expected Units:** {', '.join(param_config['expected_units'])}
 
-    **Task:**
-    Extract the {param_config['display_name']} value from the context above.
+**Document Context:**
+{context}
 
-    **Confidence Scoring Rules:**
-    - Clarity of the value (0.5)
-    - Presence of unit (0.2)
-    - Contextual relevance (0.3)
-    """
+**Instructions:**
+Return a JSON object with EXACTLY these fields:
+{{
+  "found": true or false,
+  "value": "extracted value as string, or null if not found",
+  "value_numeric": numeric value as a number or null,
+  "unit": "unit string or null",
+  "source_number": 1, 2, or 3 (which source contained the value),
+  "confidence": float between 0.0 and 1.0,
+  "explanation": "brief explanation of where/how you found it"
+}}
+
+Set "found" to true only if the parameter is clearly present in the context.
+"""
         logger.info(prompt)
         try:
-            response = client.models.generate_content(
-                model="gemini-3.1-flash-preview",
+            response = self.gemini.models.generate_content(
+                model="gemini-2.5-flash",
                 config=types.GenerateContentConfig(
                     system_instruction=system_instr,
                     # Forces valid JSON and removes the need for "No prose" in prompt

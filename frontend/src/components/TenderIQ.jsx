@@ -2,8 +2,8 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { C, F } from "@/lib/design";
 import { api } from "@/lib/api";
-import AuthScreen from "@/components/AuthScreen";
 import ProfileScreen from "@/components/ProfileScreen";
+import AuthScreen from "@/components/AuthScreen";
 import ResultsPanel from "@/components/ResultsPanel";
 import { ChatCtxMenu, RenameModal, DeleteModal } from "@/components/Modals";
 import {
@@ -50,15 +50,17 @@ function BoldText({ text }) {
 export default function TenderIQ() {
   const [screen, setScreen] = useState("auth");
   const [token, setToken] = useState(null);
+  const [user, setUser] = useState(null);
   const [sideOpen, setSideOpen] = useState(true);
   const [showResults, setShowResults] = useState(false);
   const [mobResults, setMobResults] = useState(false);
   const [msgs, setMsgs] = useState([]);
   const [input, setInput] = useState("");
-  const [files, setFiles] = useState([]);       // File[] from input
+  const [files, setFiles] = useState([]);
   const [isMob, setIsMob] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
   const [typingStage, setTypingStage] = useState(0);
+  const [isDragging, setIsDragging] = useState(false);
   const [ctxMenu, setCtxMenu] = useState(null);
   const [renameModal, setRenameModal] = useState(null);
   const [deleteModal, setDeleteModal] = useState(null);
@@ -78,43 +80,19 @@ export default function TenderIQ() {
   // Auto-scroll
   useEffect(() => { chatEnd.current?.scrollIntoView({ behavior: "smooth" }); }, [msgs, isTyping]);
 
-  // Load project history after login
-  const loadChats = useCallback(async (tk) => {
-    const projects = await api.listProjects(tk);
-    if (Array.isArray(projects) && projects.length > 0) {
-      setChats(projects.map(p => ({
-        id: p.project_id || p.id,
-        title: p.project_name || p.name || "Untitled",
-        date: p.created_at ? new Date(p.created_at).toLocaleDateString() : "",
-      })));
-    }
-  }, []);
-
-  const handleLogin = useCallback((tk) => {
-    setToken(tk);
-    setScreen("main");
-    loadChats(tk);
-  }, [loadChats]);
-
-  const handleLogout = () => {
-    setToken(null);
-    setScreen("auth");
-    setMsgs([]);
-    setChats([]);
-    setCurrentProjectId(null);
-  };
+  // Project history is loaded on login, no need to reload on mount
 
   // ── Run the 4-stage typing animation ──
   const runTypingAnimation = (onDone) => {
     setIsTyping(true);
     setTypingStage(0);
     let s = 0;
-    const iv = setInterval(() => {
+    const iv = setInterval(async () => {
       s++;
       if (s >= STAGES.length) {
         clearInterval(iv);
+        await onDone();
         setIsTyping(false);
-        onDone();
       } else {
         setTypingStage(s);
       }
@@ -164,7 +142,12 @@ export default function TenderIQ() {
       // Chat with existing project
       try {
         const res = await api.query(token, currentProjectId, userText);
-        setMsgs([...newMsgs, { role: "assistant", type: "text", content: res.answer || res.response || "No response." }]);
+        const sources = (res.sources || []).filter(s => s.page || s.section);
+        setMsgs([...newMsgs, {
+          role: "assistant", type: "text",
+          content: res.answer || res.response || "No response.",
+          sources: sources.map(s => `${s.document}${s.page ? ` · Page ${s.page}` : ""}${s.section ? ` · ${s.section}` : ""}`),
+        }]);
       } catch (e) {
         setMsgs([...newMsgs, { role: "assistant", type: "text", content: `Query failed: ${e.message}` }]);
       }
@@ -196,11 +179,28 @@ export default function TenderIQ() {
     setCurrentProjectName("");
   };
 
-  // ── Auth / Profile screens ──
+  // ── Auth screen ──
+  const handleLogin = (accessToken) => {
+    setToken(accessToken);
+    setScreen("main");
+    // Load project history after login
+    api.listProjects(accessToken).then(projects => {
+      if (Array.isArray(projects) && projects.length > 0) {
+        setChats(projects.map(p => ({
+          id: p.project_id || p.id,
+          title: p.project_name || p.name || "Untitled",
+          date: p.created_at ? new Date(p.created_at).toLocaleDateString() : "",
+        })));
+      }
+    });
+  };
+
   if (screen === "auth") return <AuthScreen onLogin={handleLogin} />;
+
+  // ── Profile screen ──
   if (screen === "profile") return (
     <div style={{ minHeight: "100vh", background: C.bg }}>
-      <ProfileScreen onBack={() => setScreen("main")} onLogout={handleLogout} />
+      <ProfileScreen user={user} onBack={() => setScreen("main")} />
     </div>
   );
 
@@ -255,17 +255,13 @@ export default function TenderIQ() {
           ))}
         </div>
 
-        <div style={{ padding: "8px 10px", borderTop: `1px solid ${C.border}` }}>
-          <button onClick={() => setScreen("profile")}
-            style={{ width: "100%", padding: "9px 10px", background: "transparent", border: "none", borderRadius: 8, color: C.text2, cursor: "pointer", fontFamily: F.sans, fontSize: 13, display: "flex", alignItems: "center", gap: 10, transition: "all 0.1s" }}
-            onMouseEnter={e => e.currentTarget.style.background = C.bg2}
-            onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
-            <div style={{ width: 30, height: 30, borderRadius: "50%", background: `linear-gradient(135deg, ${C.green}, ${C.navy})`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700, color: "#fff", flexShrink: 0 }}>TW</div>
-            <div style={{ flex: 1, textAlign: "left" }}>
-              <div style={{ fontSize: 13, fontWeight: 500, color: C.text1 }}>Thomas Weber</div>
-              <div style={{ fontSize: 10, color: C.text3 }}>t.weber@schuco-uk.com</div>
-            </div>
-            <SettingsIcon />
+        {/* Logout */}
+        <div style={{ padding: "10px 12px", borderTop: `1px solid ${C.border}` }}>
+          <button onClick={() => { setToken(null); setScreen("auth"); setChats([]); newAnalysis(); }}
+            style={{ width: "100%", padding: "9px 14px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 8, color: C.text3, cursor: "pointer", fontSize: 12, fontFamily: F.sans, fontWeight: 500, textAlign: "left", transition: "all 0.15s" }}
+            onMouseEnter={e => { e.currentTarget.style.color = C.err; e.currentTarget.style.borderColor = C.err; }}
+            onMouseLeave={e => { e.currentTarget.style.color = C.text3; e.currentTarget.style.borderColor = C.border; }}>
+            Sign Out
           </button>
         </div>
       </div>
@@ -300,21 +296,70 @@ export default function TenderIQ() {
                     <SchucoMark />
                   </div>
                   <h1 style={{ margin: "0 0 8px", fontSize: 22, fontWeight: 700, color: C.text1 }}>Welcome to TenderIQ</h1>
-                  <p style={{ margin: "0 0 36px", fontSize: 14, color: C.text2, maxWidth: 400, lineHeight: 1.6 }}>
+                  <p style={{ margin: "0 0 28px", fontSize: 14, color: C.text2, maxWidth: 400, lineHeight: 1.6 }}>
                     Upload a tender document or BoQ to automatically extract wind loads, water resistance, system specs, and compliance data.
                   </p>
-                  <div style={{ display: "grid", gridTemplateColumns: isMob ? "1fr" : "1fr 1fr 1fr", gap: 12, width: "100%", maxWidth: 600 }}>
+
+                  {/* Drop zone */}
+                  <div
+                    onClick={() => fileRef.current?.click()}
+                    onDragOver={e => { e.preventDefault(); setIsDragging(true); }}
+                    onDragLeave={() => setIsDragging(false)}
+                    onDrop={e => {
+                      e.preventDefault();
+                      setIsDragging(false);
+                      const dropped = Array.from(e.dataTransfer.files).filter(f =>
+                        /\.(pdf|docx?|xlsx?)$/i.test(f.name)
+                      );
+                      if (dropped.length) setFiles(dropped);
+                    }}
+                    style={{
+                      width: "100%", maxWidth: 480, padding: "36px 24px",
+                      border: `2px dashed ${isDragging ? C.green : C.border}`,
+                      borderRadius: 14, cursor: "pointer", marginBottom: 20,
+                      background: isDragging ? C.greenSubtle : C.bg1,
+                      transition: "all 0.2s",
+                    }}
+                    onMouseEnter={e => { if (!isDragging) e.currentTarget.style.borderColor = C.greenBorder; }}
+                    onMouseLeave={e => { if (!isDragging) e.currentTarget.style.borderColor = C.border; }}
+                  >
+                    <div style={{ color: C.green, marginBottom: 14, display: "flex", justifyContent: "center" }}><UploadIcon /></div>
+                    <div style={{ fontSize: 15, fontWeight: 600, color: C.text1, marginBottom: 6 }}>
+                      {isDragging ? "Drop to upload" : "Drag & drop your file here"}
+                    </div>
+                    <div style={{ fontSize: 12, color: C.text3, marginBottom: 16 }}>or click to browse</div>
+                    <div style={{ display: "flex", justifyContent: "center", gap: 8, flexWrap: "wrap" }}>
+                      {["PDF", "DOCX", "XLSX"].map(ext => (
+                        <span key={ext} style={{ padding: "3px 10px", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 20, fontSize: 11, color: C.text3, fontWeight: 600 }}>{ext}</span>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Selected files preview */}
+                  {files.length > 0 && (
+                    <div style={{ width: "100%", maxWidth: 480, marginBottom: 16 }}>
+                      {files.map((f, i) => (
+                        <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "9px 14px", background: C.bg1, borderRadius: 8, border: `1px solid ${C.greenBorder}`, marginBottom: 6, fontSize: 13, color: C.text1 }}>
+                          <FileIcon />
+                          <span style={{ flex: 1, textAlign: "left", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.name}</span>
+                          <button onClick={e => { e.stopPropagation(); setFiles(files.filter((_, j) => j !== i)); }} style={{ background: "none", border: "none", color: C.text3, cursor: "pointer", display: "flex" }}><CloseIcon /></button>
+                        </div>
+                      ))}
+                      <button onClick={handleSend}
+                        style={{ width: "100%", padding: "11px 0", background: C.green, border: "none", borderRadius: 8, color: "#111", fontWeight: 700, fontSize: 14, fontFamily: F.sans, cursor: "pointer", marginTop: 4 }}>
+                        Analyse Document
+                      </button>
+                    </div>
+                  )}
+
+                  <div style={{ display: "flex", gap: 20, marginTop: 8 }}>
                     {[
-                      { icon: <UploadIcon />, t: "Upload BoQ", d: "PDF, DOCX, or XLSX" },
                       { icon: <FileIcon />, t: "Auto-Extract", d: "Wind, water, thermal data" },
                       { icon: <ChatIcon />, t: "Ask Questions", d: "Chat about your tender" },
                     ].map((item, i) => (
-                      <div key={i}
-                        style={{ padding: 20, background: C.bg1, borderRadius: 10, border: `1px solid ${C.border}`, textAlign: "center", transition: "border-color 0.15s" }}
-                        onMouseEnter={e => e.currentTarget.style.borderColor = C.greenBorder}
-                        onMouseLeave={e => e.currentTarget.style.borderColor = C.border}>
-                        <div style={{ color: C.green, marginBottom: 10 }}>{item.icon}</div>
-                        <div style={{ fontSize: 13, fontWeight: 600, color: C.text1, marginBottom: 4 }}>{item.t}</div>
+                      <div key={i} style={{ padding: "14px 18px", background: C.bg1, borderRadius: 10, border: `1px solid ${C.border}`, textAlign: "center", minWidth: 130 }}>
+                        <div style={{ color: C.green, marginBottom: 8 }}>{item.icon}</div>
+                        <div style={{ fontSize: 12, fontWeight: 600, color: C.text1, marginBottom: 3 }}>{item.t}</div>
                         <div style={{ fontSize: 11, color: C.text3 }}>{item.d}</div>
                       </div>
                     ))}
@@ -333,15 +378,20 @@ export default function TenderIQ() {
                         <FileIcon /><span style={{ color: m.role === "user" ? "#111" : C.text1 }}>{m.content}</span>
                       </div>
                     )}
-                    {m.type === "sources" && m.sources?.length > 0 && (
-                      <div style={{ marginTop: 10, padding: "8px 10px", background: "rgba(0,0,0,0.12)", borderRadius: 6, fontSize: 11, color: C.text3 }}>
-                        <div style={{ fontWeight: 600, marginBottom: 4, color: C.text2 }}>Sources</div>
-                        {m.sources.map((s, j) => <div key={j} style={{ marginBottom: 2 }}>· {s}</div>)}
-                      </div>
-                    )}
                     <div style={{ fontSize: 14, lineHeight: 1.65, color: m.role === "user" ? "#111" : C.text1, whiteSpace: "pre-wrap", fontWeight: m.role === "user" ? 500 : 400 }}>
                       <BoldText text={m.text || m.content} />
                     </div>
+                    {m.sources?.length > 0 && (
+                      <div style={{ marginTop: 10, padding: "8px 10px", background: "rgba(0,0,0,0.15)", borderRadius: 6, fontSize: 11, color: C.text3, borderTop: `1px solid rgba(255,255,255,0.06)` }}>
+                        <div style={{ fontWeight: 600, marginBottom: 5, color: C.text2, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em" }}>Sources</div>
+                        {m.sources.map((s, j) => (
+                          <div key={j} style={{ display: "flex", alignItems: "flex-start", gap: 5, marginBottom: 3 }}>
+                            <span style={{ color: C.green, fontWeight: 700, flexShrink: 0 }}>·</span>
+                            <span>{s}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
               ))}
@@ -421,6 +471,30 @@ export default function TenderIQ() {
         <DeleteModal name={deleteModal.title}
           onConfirm={() => { setChats(chats.filter(c => c.id !== deleteModal.id)); if (currentProjectId === deleteModal.id) newAnalysis(); setDeleteModal(null); }}
           onClose={() => setDeleteModal(null)} />
+      )}
+
+      {/* ── Analysing overlay ── */}
+      {isTyping && msgs.some(m => m.type === "file") && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(10,14,20,0.85)", zIndex: 500, display: "flex", alignItems: "center", justifyContent: "center", backdropFilter: "blur(4px)", animation: "fadeUp 0.3s ease" }}>
+          <div style={{ background: C.bg1, borderRadius: 20, padding: "40px 48px", border: `1px solid ${C.border}`, textAlign: "center", maxWidth: 420, width: "90%" }}>
+            <div style={{ width: 56, height: 56, borderRadius: 14, background: C.greenSubtle, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 24px", border: `1px solid ${C.greenBorder}` }}>
+              <SchucoMark />
+            </div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: C.text1, marginBottom: 8 }}>Analysing Document</div>
+            <div style={{ fontSize: 13, color: C.text2, marginBottom: 28, lineHeight: 1.5 }}>{STAGES[typingStage]}&hellip;</div>
+            {/* Progress bar */}
+            <div style={{ height: 4, background: C.border, borderRadius: 2, overflow: "hidden", marginBottom: 12 }}>
+              <div style={{ height: "100%", background: `linear-gradient(90deg, ${C.green}, ${C.accentHover})`, borderRadius: 2, width: `${((typingStage + 1) / STAGES.length) * 100}%`, transition: "width 0.8s ease" }} />
+            </div>
+            <div style={{ fontSize: 11, color: C.text3 }}>Step {typingStage + 1} of {STAGES.length}</div>
+            {/* Dots */}
+            <div style={{ display: "flex", justifyContent: "center", gap: 6, marginTop: 20 }}>
+              {[0, 1, 2].map(i => (
+                <div key={i} style={{ width: 8, height: 8, borderRadius: "50%", background: C.green, animation: `pulse 1.2s ease ${i * 0.2}s infinite` }} />
+              ))}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

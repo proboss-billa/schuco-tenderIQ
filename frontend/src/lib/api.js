@@ -67,6 +67,14 @@ export const api = {
     return res.json();
   },
 
+  async getMe(token) {
+    const res = await fetch(`${BASE}/me`, {
+      headers: authHeaders(token),
+    });
+    if (!res.ok) throw new Error("Failed to fetch user");
+    return res.json();
+  },
+
   async listProjects(token) {
     try {
       const res = await fetch(`${BASE}/projects`, {

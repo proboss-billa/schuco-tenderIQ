@@ -2,6 +2,7 @@
 import { useState, useEffect, useRef } from "react";
 import { C, F, inputBase, lbl, btnG, fB, bB } from "@/lib/design";
 import { api } from "@/lib/api";
+import { COUNTRY_CODES } from "@/lib/countryCodes";
 import {
   SchucoFull, BackIcon, EyeIcon, EyeOffIcon, CheckIcon, MailIcon,
 } from "@/components/Icons";
@@ -9,7 +10,7 @@ import {
 export default function AuthScreen({ onLogin }) {
   const [view, setView] = useState("login");
   const [showPw, setShowPw] = useState(false);
-  const [form, setForm] = useState({ email: "", pw: "", first: "", last: "", cc: "+91", phone: "", pw2: "" });
+  const [form, setForm] = useState({ email: "", pw: "", first: "", last: "", cc: "+49", phone: "", pw2: "" });
   const [otpValues, setOtpValues] = useState(["", "", "", "", "", ""]);
   const [otpTimer, setOtpTimer] = useState(30);
   const [error, setError] = useState("");
@@ -121,11 +122,15 @@ export default function AuthScreen({ onLogin }) {
             </div>
             <div style={{ marginBottom: 14 }}>
               <label style={lbl}>Phone Number</label>
-              <div style={{ display: "grid", gridTemplateColumns: "85px 1fr", gap: 8 }}>
-                <select style={{ ...inputBase, cursor: "pointer", textAlign: "center", padding: "11px 6px" }} value={form.cc} onChange={f("cc")}>
-                  {["+91", "+1", "+44", "+49", "+33", "+971", "+65", "+61"].map(c => <option key={c} value={c}>{c}</option>)}
+              <div style={{ display: "grid", gridTemplateColumns: "160px 1fr", gap: 8 }}>
+                <select style={{ ...inputBase, cursor: "pointer", padding: "11px 8px" }} value={form.cc} onChange={f("cc")}>
+                  {COUNTRY_CODES.map((c, i) => (
+                    <option key={i} value={c.code}>{c.code} {c.country}</option>
+                  ))}
                 </select>
-                <input style={inputBase} type="tel" placeholder="98765 43210" value={form.phone} onChange={f("phone")} onFocus={fB} onBlur={bB} />
+                <input style={inputBase} type="tel"
+                  placeholder={COUNTRY_CODES.find(c => c.code === form.cc)?.placeholder || "000 000 0000"}
+                  value={form.phone} onChange={f("phone")} onFocus={fB} onBlur={bB} />
               </div>
             </div>
             <div style={{ marginBottom: 14 }}>

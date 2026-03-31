@@ -294,7 +294,7 @@ class DocumentProcessor:
                 project_id=self.project_id,
                 chunk_index=chunk["chunk_index"],
                 chunk_text=chunk["text"],
-                page_number=chunk.get("page"),
+                page_number=chunk.get("page_start") or chunk.get("page"),
                 section_title=chunk.get("section"),
                 subsection_title=chunk.get("subsection"),
                 pinecone_id=vector_id,
@@ -505,18 +505,23 @@ class DocumentProcessor:
 
     def _process_boq_document(self, document):
         """Process Excel BOQ"""
+        try:
+            boq_items = self._parse_excel_boq(document.file_path)
+        except Exception as e:
+            logger.warning(f"Skipping BOQ parsing for {document.original_filename}: {e}")
+            boq_items = []
 
-        # Parse Excel
-        boq_items = self._parse_excel_boq(document.file_path)
-
-        # Store in PostgreSQL
         for item in boq_items:
-            boq_record = BOQItem(
-                project_id=self.project_id,
-                document_id=document.document_id,
-                **item
-            )
-            self.db.add(boq_record)
+            try:
+                boq_record = BOQItem(
+                    project_id=self.project_id,
+                    document_id=document.document_id,
+                    **item
+                )
+                self.db.add(boq_record)
+            except Exception as e:
+                logger.warning(f"Skipping BOQ item: {e}")
+                continue
 
         document.processed = True
         self.db.commit()

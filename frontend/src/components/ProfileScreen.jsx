@@ -1,15 +1,16 @@
 "use client";
 import { useState } from "react";
 import { C, F, inputBase, lbl } from "@/lib/design";
-import { BackIcon, LogoutIcon, CheckIcon } from "@/components/Icons";
+import { COUNTRY_CODES } from "@/lib/countryCodes";
+import { BackIcon, CheckIcon } from "@/components/Icons";
 
-export default function ProfileScreen({ user, onBack, onLogout }) {
+export default function ProfileScreen({ user, onBack }) {
   const [p, setP] = useState({
-    first: user?.first || "Thomas",
-    last: user?.last || "Weber",
-    email: user?.email || "t.weber@schuco-uk.com",
-    cc: "+44",
-    phone: "7911 234567",
+    first: "",
+    last: "",
+    email: user?.email || "",
+    cc: "+49",
+    phone: "",
   });
   const [saved, setSaved] = useState(false);
   const [changePw, setChangePw] = useState(false);
@@ -31,11 +32,10 @@ export default function ProfileScreen({ user, onBack, onLogout }) {
 
       <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 28 }}>
         <div style={{ width: 60, height: 60, borderRadius: "50%", background: `linear-gradient(135deg, ${C.green}, ${C.navy})`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, fontWeight: 700, color: "#fff", flexShrink: 0 }}>
-          {p.first[0]}{p.last[0]}
+          {p.email ? p.email[0].toUpperCase() : "?"}
         </div>
         <div>
-          <div style={{ fontSize: 16, fontWeight: 600, color: C.text1 }}>{p.first} {p.last}</div>
-          <div style={{ fontSize: 12, color: C.text3 }}>{p.email}</div>
+          <div style={{ fontSize: 16, fontWeight: 600, color: C.text1 }}>{p.email}</div>
         </div>
       </div>
 
@@ -52,11 +52,15 @@ export default function ProfileScreen({ user, onBack, onLogout }) {
         </div>
         <div>
           <label style={lbl}>Phone Number</label>
-          <div style={{ display: "grid", gridTemplateColumns: "85px 1fr", gap: 8 }}>
-            <select style={{ ...inputBase, cursor: "pointer", textAlign: "center" }} value={p.cc} onChange={f("cc")}>
-              {["+44", "+91", "+1", "+49", "+33"].map(c => <option key={c} value={c}>{c}</option>)}
+          <div style={{ display: "grid", gridTemplateColumns: "160px 1fr", gap: 8 }}>
+            <select style={{ ...inputBase, cursor: "pointer", padding: "11px 8px" }} value={p.cc} onChange={f("cc")}>
+              {COUNTRY_CODES.map((c, i) => (
+                <option key={i} value={c.code}>{c.code} {c.country}</option>
+              ))}
             </select>
-            <input style={inputBase} value={p.phone} onChange={f("phone")} onFocus={fB} onBlur={bB} />
+            <input style={inputBase} type="tel"
+              placeholder={COUNTRY_CODES.find(c => c.code === p.cc)?.placeholder || "000 000 0000"}
+              value={p.phone} onChange={f("phone")} onFocus={fB} onBlur={bB} />
           </div>
         </div>
       </div>
@@ -83,10 +87,7 @@ export default function ProfileScreen({ user, onBack, onLogout }) {
         )}
       </div>
 
-      <div style={{ display: "flex", gap: 10, justifyContent: "space-between", alignItems: "center" }}>
-        <button onClick={onLogout} style={{ padding: "10px 18px", background: "transparent", border: `1px solid rgba(255,90,90,0.25)`, borderRadius: 8, color: C.err, cursor: "pointer", fontSize: 13, fontFamily: F.sans, fontWeight: 500, display: "flex", alignItems: "center", gap: 6 }}>
-          <LogoutIcon /> Sign Out
-        </button>
+      <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", alignItems: "center" }}>
         <div style={{ display: "flex", gap: 10 }}>
           <button onClick={onBack} style={{ padding: "10px 20px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 8, color: C.text2, cursor: "pointer", fontSize: 13, fontFamily: F.sans }}>Cancel</button>
           <button onClick={save} style={{ padding: "10px 20px", background: C.green, border: "none", borderRadius: 8, color: "#111", cursor: "pointer", fontSize: 13, fontFamily: F.sans, fontWeight: 700, display: "flex", alignItems: "center", gap: 5 }}>

@@ -34,20 +34,10 @@ def create_access_token(data: dict):
 
 security = HTTPBearer()
 
-# def get_current_user(
-#     credentials: HTTPAuthorizationCredentials = Depends(security),
-#     db: Session = Depends(get_db_session)
-# ):
-#     token = credentials.credentials
-#
-#     try:
-#         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-#         user_id = payload.get("sub")
-#     except JWTError:
-#         raise HTTPException(status_code=401, detail="Invalid token")
-#
-#     user = db.query(User).filter(User.user_id == user_id).first()
-#     if not user:
-#         raise HTTPException(status_code=401, detail="User not found")
-#
-#     return user
+def decode_token(token: str) -> str:
+    """Decode a JWT and return the user_id (sub claim)."""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload.get("sub")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")

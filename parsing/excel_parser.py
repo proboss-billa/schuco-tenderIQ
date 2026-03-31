@@ -38,7 +38,7 @@ class ExcelBOQParser:
         column_mapping = self._detect_columns(df)
 
         if not column_mapping:
-            raise ValueError("Could not detect BOQ column structure")
+            return []  # Skip silently if BOQ structure is unrecognised
 
         # Extract items
         items = []
