@@ -63,6 +63,8 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
   const [params, setParams] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [expandedIdx, setExpandedIdx] = useState(null);
+  const [popup, setPopup] = useState(null);
 
   useEffect(() => {
     if (!projectId) return;
@@ -143,57 +145,63 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
           </div>
         )}
 
-        {!loading && params.map((r, i) => (
-          <div key={i}
-            style={{ padding: "12px 14px", background: r.available ? C.bg1 : "transparent", borderRadius: 8, marginBottom: 6, border: `1px solid ${r.available ? C.border : C.border}`, opacity: r.available ? 1 : 0.5, transition: "border-color 0.15s, opacity 0.15s", cursor: "default" }}
-            onMouseEnter={e => { if (r.available) e.currentTarget.style.borderColor = C.greenBorder; }}
-            onMouseLeave={e => { if (r.available) e.currentTarget.style.borderColor = C.border; }}>
-            <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 10, color: C.text3, marginBottom: 4, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", display: "flex", alignItems: "center", gap: 5 }}>
-                  {r.label}
-                  <span style={{ fontSize: 9, color: C.text3, fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>· {r.unit}</span>
+        {!loading && params.map((r, i) => {
+          const isExpanded = expandedIdx === i;
+          return (
+            <div key={i}
+              onClick={() => r.available && setExpandedIdx(isExpanded ? null : i)}
+              onDoubleClick={() => r.available && setPopup(r)}
+              style={{ padding: "12px 14px", background: r.available ? C.bg1 : "transparent", borderRadius: 8, marginBottom: 6, border: `1px solid ${isExpanded ? C.greenBorder : C.border}`, opacity: r.available ? 1 : 0.5, transition: "border-color 0.15s", cursor: r.available ? "pointer" : "default" }}
+              onMouseEnter={e => { if (r.available) e.currentTarget.style.borderColor = C.greenBorder; }}
+              onMouseLeave={e => { if (r.available && !isExpanded) e.currentTarget.style.borderColor = C.border; }}>
+              <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 10, color: C.text3, marginBottom: 4, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", display: "flex", alignItems: "center", gap: 5 }}>
+                    {r.label}
+                    <span style={{ fontSize: 9, color: C.text3, fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>· {r.unit}</span>
+                    {r.available && <span style={{ fontSize: 9, color: C.text3, fontWeight: 400, marginLeft: "auto" }}>{isExpanded ? "click to collapse" : "click to expand · dbl-click to pop up"}</span>}
+                  </div>
+                  {r.available ? (
+                    <div style={{ fontSize: 14, color: C.text1, fontWeight: 600, fontFamily: F.mono, wordBreak: "break-word", whiteSpace: isExpanded ? "pre-wrap" : "nowrap", overflow: isExpanded ? "visible" : "hidden", textOverflow: isExpanded ? "clip" : "ellipsis" }}>
+                      {r.value}
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: 13, color: C.text3, fontStyle: "italic" }}>Not available in document</div>
+                  )}
+                  {r.available && (r.page || r.section) && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 5, flexWrap: "wrap" }}>
+                      {r.page && (
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 3, padding: "2px 7px", background: C.greenSubtle, border: `1px solid ${C.greenBorder}`, borderRadius: 4, fontSize: 10, fontWeight: 600, color: C.green }}>
+                          Pg. {r.page}
+                        </span>
+                      )}
+                      {r.section && (
+                        <span style={{ fontSize: 10, color: C.text3, overflow: isExpanded ? "visible" : "hidden", textOverflow: isExpanded ? "clip" : "ellipsis", whiteSpace: isExpanded ? "normal" : "nowrap", maxWidth: isExpanded ? "none" : 200 }}>
+                          {r.section}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  {r.available && r.notes && (
+                    <div style={{ fontSize: 11, color: C.text3, marginTop: 6, lineHeight: 1.5, ...(isExpanded ? {} : { overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }) }}>
+                      {r.notes}
+                    </div>
+                  )}
                 </div>
                 {r.available ? (
-                  <div style={{ fontSize: 14, color: C.text1, fontWeight: 600, fontFamily: F.mono, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {r.value}
+                  <div style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "3px 8px", borderRadius: 12, background: `${confidenceColor(r.confidence)}12`, fontSize: 11, fontWeight: 600, color: confidenceColor(r.confidence), flexShrink: 0 }}>
+                    <div style={{ width: 5, height: 5, borderRadius: "50%", background: confidenceColor(r.confidence) }} />
+                    {r.confidence}%
                   </div>
                 ) : (
-                  <div style={{ fontSize: 13, color: C.text3, fontStyle: "italic" }}>Not available in document</div>
-                )}
-                {r.available && (r.page || r.section) && (
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 5, flexWrap: "wrap" }}>
-                    {r.page && (
-                      <span style={{ display: "inline-flex", alignItems: "center", gap: 3, padding: "2px 7px", background: C.greenSubtle, border: `1px solid ${C.greenBorder}`, borderRadius: 4, fontSize: 10, fontWeight: 600, color: C.green }}>
-                        Pg. {r.page}
-                      </span>
-                    )}
-                    {r.section && (
-                      <span style={{ fontSize: 10, color: C.text3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 200 }}>
-                        {r.section}
-                      </span>
-                    )}
-                  </div>
-                )}
-                {r.available && r.notes && (
-                  <div style={{ fontSize: 10, color: C.text3, marginTop: 4, lineHeight: 1.4, overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>
-                    {r.notes}
+                  <div style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "3px 8px", borderRadius: 12, background: "rgba(255,255,255,0.04)", fontSize: 11, fontWeight: 600, color: C.text3, flexShrink: 0 }}>
+                    —
                   </div>
                 )}
               </div>
-              {r.available ? (
-                <div style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "3px 8px", borderRadius: 12, background: `${confidenceColor(r.confidence)}12`, fontSize: 11, fontWeight: 600, color: confidenceColor(r.confidence), flexShrink: 0 }}>
-                  <div style={{ width: 5, height: 5, borderRadius: "50%", background: confidenceColor(r.confidence) }} />
-                  {r.confidence}%
-                </div>
-              ) : (
-                <div style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "3px 8px", borderRadius: 12, background: "rgba(255,255,255,0.04)", fontSize: 11, fontWeight: 600, color: C.text3, flexShrink: 0 }}>
-                  —
-                </div>
-              )}
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       {/* Footer */}
@@ -206,6 +214,58 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
           </div>
         )}
       </div>
+
+      {/* ── Double-click Popup Modal ── */}
+      {popup && (
+        <div onClick={() => setPopup(null)}
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 600, display: "flex", alignItems: "center", justifyContent: "center", backdropFilter: "blur(4px)", padding: 24, animation: "fadeUp 0.2s ease" }}>
+          <div onClick={e => e.stopPropagation()}
+            style={{ background: C.bg1, borderRadius: 16, border: `1px solid ${C.greenBorder}`, width: "100%", maxWidth: 520, boxShadow: "0 24px 64px rgba(0,0,0,0.5)", animation: "fadeUp 0.2s ease" }}>
+            {/* Modal header */}
+            <div style={{ padding: "18px 20px 14px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+              <div>
+                <div style={{ fontSize: 11, color: C.text3, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>{popup.label}</div>
+                <div style={{ fontSize: 11, color: C.text3 }}>{popup.unit}</div>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "4px 10px", borderRadius: 12, background: `${confidenceColor(popup.confidence)}15`, fontSize: 12, fontWeight: 700, color: confidenceColor(popup.confidence) }}>
+                  <div style={{ width: 6, height: 6, borderRadius: "50%", background: confidenceColor(popup.confidence) }} />
+                  {popup.confidence}% confidence
+                </div>
+                <button onClick={() => setPopup(null)} style={{ background: "none", border: "none", color: C.text3, cursor: "pointer", padding: 2, display: "flex" }}>
+                  <CloseIcon />
+                </button>
+              </div>
+            </div>
+            {/* Modal body */}
+            <div style={{ padding: "20px" }}>
+              <div style={{ fontSize: 22, color: C.text1, fontWeight: 700, fontFamily: F.mono, marginBottom: 16, wordBreak: "break-word", lineHeight: 1.4 }}>
+                {popup.value}
+              </div>
+              {(popup.page || popup.section) && (
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
+                  {popup.page && (
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 3, padding: "3px 10px", background: C.greenSubtle, border: `1px solid ${C.greenBorder}`, borderRadius: 6, fontSize: 11, fontWeight: 600, color: C.green }}>
+                      Page {popup.page}
+                    </span>
+                  )}
+                  {popup.section && (
+                    <span style={{ fontSize: 11, color: C.text2, lineHeight: 1.4 }}>{popup.section}</span>
+                  )}
+                </div>
+              )}
+              {popup.notes && (
+                <div style={{ fontSize: 13, color: C.text2, lineHeight: 1.65, padding: "12px 14px", background: C.bg, borderRadius: 8, border: `1px solid ${C.border}`, whiteSpace: "pre-wrap" }}>
+                  {popup.notes}
+                </div>
+              )}
+            </div>
+            <div style={{ padding: "10px 20px 16px", textAlign: "center" }}>
+              <span style={{ fontSize: 11, color: C.text3 }}>Click outside to close</span>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
