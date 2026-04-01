@@ -1,12 +1,18 @@
 "use client";
 import { C } from "@/lib/design";
 
+// Full logo — white pill container so it reads cleanly on any background
 export const SchucoFull = ({ h = 22 }) => (
-  <img src="/schuco-logo.png" alt="Schüco" style={{ height: h, width: "auto", objectFit: "contain" }} />
+  <div style={{ display: "inline-flex", alignItems: "center", background: "white", borderRadius: 6, padding: "2px 6px" }}>
+    <img src="/schuco-logo.png" alt="Schüco" style={{ height: h, width: "auto", objectFit: "contain" }} />
+  </div>
 );
 
+// Mark icon — circular clip so white corners are hidden on dark backgrounds
 export const SchucoMark = () => (
-  <img src="/sooru-logo.png" alt="Sooru" style={{ width: 32, height: 32, objectFit: "contain", borderRadius: 7 }} />
+  <div style={{ width: 32, height: 32, borderRadius: "50%", overflow: "hidden", flexShrink: 0, background: "white" }}>
+    <img src="/schuco-logo.png" alt="Schüco" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+  </div>
 );
 
 export const SendIcon = () => <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>;
