@@ -159,7 +159,6 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
                   <div style={{ fontSize: 10, color: C.text3, marginBottom: 4, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", display: "flex", alignItems: "center", gap: 5 }}>
                     {r.label}
                     <span style={{ fontSize: 9, color: C.text3, fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>· {r.unit}</span>
-                    {r.available && <span style={{ fontSize: 9, color: C.text3, fontWeight: 400, marginLeft: "auto" }}>{isExpanded ? "click to collapse" : "click to expand · dbl-click to pop up"}</span>}
                   </div>
                   {r.available ? (
                     <div style={{ fontSize: 14, color: C.text1, fontWeight: 600, fontFamily: F.mono, wordBreak: "break-word", whiteSpace: isExpanded ? "pre-wrap" : "nowrap", overflow: isExpanded ? "visible" : "hidden", textOverflow: isExpanded ? "clip" : "ellipsis" }}>
@@ -168,18 +167,9 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
                   ) : (
                     <div style={{ fontSize: 13, color: C.text3, fontStyle: "italic" }}>Not available in document</div>
                   )}
-                  {r.available && (r.page || r.section) && (
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 5, flexWrap: "wrap" }}>
-                      {r.page && (
-                        <span style={{ display: "inline-flex", alignItems: "center", gap: 3, padding: "2px 7px", background: C.greenSubtle, border: `1px solid ${C.greenBorder}`, borderRadius: 4, fontSize: 10, fontWeight: 600, color: C.green }}>
-                          Pg. {r.page}
-                        </span>
-                      )}
-                      {r.section && (
-                        <span style={{ fontSize: 10, color: C.text3, overflow: isExpanded ? "visible" : "hidden", textOverflow: isExpanded ? "clip" : "ellipsis", whiteSpace: isExpanded ? "normal" : "nowrap", maxWidth: isExpanded ? "none" : 200 }}>
-                          {r.section}
-                        </span>
-                      )}
+                  {r.available && r.section && isExpanded && (
+                    <div style={{ marginTop: 5 }}>
+                      <span style={{ fontSize: 10, color: C.text3, lineHeight: 1.4 }}>{r.section}</span>
                     </div>
                   )}
                   {r.available && r.notes && (
@@ -189,9 +179,16 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
                   )}
                 </div>
                 {r.available ? (
-                  <div style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "3px 8px", borderRadius: 12, background: `${confidenceColor(r.confidence)}12`, fontSize: 11, fontWeight: 600, color: confidenceColor(r.confidence), flexShrink: 0 }}>
-                    <div style={{ width: 5, height: 5, borderRadius: "50%", background: confidenceColor(r.confidence) }} />
-                    {r.confidence}%
+                  <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, flexShrink: 0 }}>
+                    <div style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "3px 8px", borderRadius: 12, background: `${confidenceColor(r.confidence)}12`, fontSize: 11, fontWeight: 600, color: confidenceColor(r.confidence) }}>
+                      <div style={{ width: 5, height: 5, borderRadius: "50%", background: confidenceColor(r.confidence) }} />
+                      {r.confidence}%
+                    </div>
+                    {r.page && (
+                      <span style={{ display: "inline-flex", alignItems: "center", padding: "2px 6px", background: C.greenSubtle, border: `1px solid ${C.greenBorder}`, borderRadius: 4, fontSize: 9, fontWeight: 600, color: C.green }}>
+                        Pg. {r.page}
+                      </span>
+                    )}
                   </div>
                 ) : (
                   <div style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "3px 8px", borderRadius: 12, background: "rgba(255,255,255,0.04)", fontSize: 11, fontWeight: 600, color: C.text3, flexShrink: 0 }}>
