@@ -94,7 +94,7 @@ def initialize_pinecone():
 # ── Shared service clients (stateless, safe to share) ────────────────────────
 pinecone_index = initialize_pinecone()
 embedding_client = GoogleEmbedding()
-llm_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+# llm_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
