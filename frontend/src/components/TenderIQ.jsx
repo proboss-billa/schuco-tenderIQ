@@ -7,8 +7,9 @@ import AuthScreen from "@/components/AuthScreen";
 import ResultsPanel from "@/components/ResultsPanel";
 import { ChatCtxMenu, RenameModal, DeleteModal } from "@/components/Modals";
 import {
-  SchucoFull, SchucoMark, SendIcon, UploadIcon, FileIcon, ChatIcon,
-  SettingsIcon, PlusIcon, MenuIcon, CloseIcon, PanelIcon, MoreIcon,
+  SchucoMark, SendIcon, UploadIcon, FileIcon, ChatIcon,
+  PlusIcon, MenuIcon, CloseIcon, PanelIcon, MoreIcon,
+  LogoutIcon, ChevronLeftIcon,
 } from "@/components/Icons";
 
 // ── Typing indicator ────────────────────────────────
@@ -206,71 +207,144 @@ export default function TenderIQ() {
 
   const hasContent = msgs.length > 0 || isTyping;
 
+  const SIDE_W = 258;
+  const SIDE_MINI = 64;
+  const sidebarW = sideOpen ? SIDE_W : SIDE_MINI;
+  const logout = () => { setToken(null); setScreen("auth"); setChats([]); newAnalysis(); };
+
+  const iconBtn = (onClick, title, children, danger = false) => (
+    <button onClick={onClick} title={title}
+      style={{ width: 40, height: 40, borderRadius: 10, background: "transparent", border: "none", color: danger ? C.text3 : C.text2, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", transition: "all 0.15s", fontFamily: F.sans }}
+      onMouseEnter={e => { e.currentTarget.style.background = danger ? "rgba(255,90,90,0.1)" : C.bg2; e.currentTarget.style.color = danger ? C.err : C.text1; }}
+      onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = danger ? C.text3 : C.text2; }}>
+      {children}
+    </button>
+  );
+
   return (
-    <div style={{ display: "flex", height: "100vh", background: C.bg, fontFamily: F.sans, overflow: "hidden" }}>
-      {/* ── Sidebar ── */}
-      <div style={{ width: sideOpen ? 260 : 0, minWidth: sideOpen ? 260 : 0, background: C.navyDark, borderRight: `1px solid ${C.border}`, display: "flex", flexDirection: "column", overflow: "hidden", transition: "all 0.25s ease", position: isMob ? "fixed" : "relative", zIndex: isMob ? 100 : 1, height: "100%" }}>
-        <div style={{ padding: "18px 18px 14px", borderBottom: `1px solid ${C.border}` }}>
-          <div style={{ marginBottom: 6 }}><SchucoFull h={18} /></div>
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <span style={{ fontSize: 16, fontWeight: 700, color: C.text1 }}>TenderIQ</span>
-            <div style={{ height: 12, width: 1, background: C.border2 }} />
-            <span style={{ fontSize: 9, color: C.text3, letterSpacing: "0.1em", textTransform: "uppercase", fontWeight: 500 }}>Smart Analysis</span>
-          </div>
-        </div>
+    <div style={{ height: "100vh", background: C.bg, fontFamily: F.sans, overflow: "hidden" }}>
 
-        <div style={{ padding: "12px 12px 6px" }}>
-          <button onClick={newAnalysis}
-            style={{ width: "100%", padding: "10px 14px", background: C.greenSubtle, border: `1px solid ${C.greenBorder}`, borderRadius: 8, color: C.green, cursor: "pointer", fontSize: 13, fontWeight: 700, fontFamily: F.sans, display: "flex", alignItems: "center", gap: 8, transition: "all 0.15s" }}
-            onMouseEnter={e => e.currentTarget.style.background = C.greenGlow}
-            onMouseLeave={e => e.currentTarget.style.background = C.greenSubtle}>
-            <PlusIcon /> New Analysis
-          </button>
-        </div>
+      {/* ── Floating Sidebar ── */}
+      <div style={{
+        position: "fixed", left: 10, top: 10, bottom: 10,
+        width: sidebarW,
+        background: C.navyDark,
+        borderRadius: 18,
+        border: `1px solid ${C.border}`,
+        boxShadow: "0 8px 40px rgba(0,0,0,0.55)",
+        display: "flex", flexDirection: "column",
+        overflow: "hidden",
+        transition: "width 0.25s cubic-bezier(0.4,0,0.2,1)",
+        zIndex: 100,
+      }}>
 
-        <div style={{ flex: 1, overflowY: "auto", padding: "6px 8px" }}>
-          <div style={{ fontSize: 10, fontWeight: 600, color: C.text3, padding: "8px 8px 6px", letterSpacing: "0.1em", textTransform: "uppercase" }}>Recent</div>
-          {chats.length === 0 && (
-            <div style={{ padding: "12px 8px", fontSize: 12, color: C.text3 }}>No analyses yet</div>
-          )}
-          {chats.map(chat => (
-            <div key={chat.id} style={{ position: "relative", marginBottom: 1 }}>
-              <button onClick={() => openChat(chat)} onContextMenu={e => handleCtx(e, chat)}
-                style={{ width: "100%", padding: "9px 32px 9px 10px", background: currentProjectId === chat.id ? C.bg2 : "transparent", border: "none", borderRadius: 6, color: currentProjectId === chat.id ? C.text1 : C.text2, cursor: "pointer", textAlign: "left", fontFamily: F.sans, fontSize: 13, display: "flex", alignItems: "center", gap: 8, transition: "all 0.1s" }}
-                onMouseEnter={e => { if (currentProjectId !== chat.id) { e.currentTarget.style.background = C.bg2; e.currentTarget.style.color = C.text1; } }}
-                onMouseLeave={e => { if (currentProjectId !== chat.id) { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = C.text2; } }}>
-                <ChatIcon />
-                <div style={{ flex: 1, overflow: "hidden" }}>
-                  <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{chat.title}</div>
-                  <div style={{ fontSize: 10, color: C.text3, marginTop: 1 }}>{chat.date}</div>
-                </div>
-              </button>
-              <button onClick={e => handleCtx(e, chat)}
-                style={{ position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: C.text3, cursor: "pointer", padding: 2, opacity: 0.4, transition: "opacity 0.15s" }}
-                onMouseEnter={e => e.currentTarget.style.opacity = 1}
-                onMouseLeave={e => e.currentTarget.style.opacity = 0.4}>
-                <MoreIcon />
-              </button>
+        {/* ── Header: TenderIQ ── */}
+        <div style={{ padding: sideOpen ? "14px 12px 12px" : "14px 0 12px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: sideOpen ? "space-between" : "center", flexShrink: 0, gap: 8 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 9, cursor: "pointer", overflow: "hidden" }} onClick={() => !sideOpen && setSideOpen(true)}>
+            <div style={{ width: 34, height: 34, borderRadius: 10, background: "rgba(59,130,246,0.12)", border: "1px solid rgba(59,130,246,0.25)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, overflow: "hidden" }}>
+              <img src="/tenderIQ.png" alt="TenderIQ" style={{ width: 24, height: 24, objectFit: "contain" }} />
             </div>
-          ))}
+            {sideOpen && <span style={{ fontSize: 15, fontWeight: 700, color: C.text1, whiteSpace: "nowrap", letterSpacing: "-0.02em" }}>TenderIQ</span>}
+          </div>
+          {sideOpen && (
+            <button onClick={() => setSideOpen(false)}
+              style={{ background: "none", border: "none", color: C.text3, cursor: "pointer", padding: 4, borderRadius: 6, display: "flex", flexShrink: 0, transition: "color 0.15s" }}
+              onMouseEnter={e => e.currentTarget.style.color = C.text1}
+              onMouseLeave={e => e.currentTarget.style.color = C.text3}>
+              <ChevronLeftIcon />
+            </button>
+          )}
         </div>
 
-        {/* Logout */}
-        <div style={{ padding: "10px 12px", borderTop: `1px solid ${C.border}` }}>
-          <button onClick={() => { setToken(null); setScreen("auth"); setChats([]); newAnalysis(); }}
-            style={{ width: "100%", padding: "9px 14px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 8, color: C.text3, cursor: "pointer", fontSize: 12, fontFamily: F.sans, fontWeight: 500, textAlign: "left", transition: "all 0.15s" }}
-            onMouseEnter={e => { e.currentTarget.style.color = C.err; e.currentTarget.style.borderColor = C.err; }}
-            onMouseLeave={e => { e.currentTarget.style.color = C.text3; e.currentTarget.style.borderColor = C.border; }}>
-            Sign Out
-          </button>
+        {/* ── Partnership: Schüco × Sooru ── */}
+        {sideOpen ? (
+          <div style={{ padding: "9px 14px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", gap: 7, flexShrink: 0 }}>
+            <img src="/schueco-logo.png" alt="Schüco" style={{ height: 13, objectFit: "contain", filter: "brightness(0) invert(1)", opacity: 0.8 }} />
+            <span style={{ color: C.text3, fontSize: 12, fontWeight: 700, flexShrink: 0, lineHeight: 1 }}>×</span>
+            <img src="/sooru-logo.png" alt="Sooru" style={{ height: 17, objectFit: "contain", filter: "brightness(0) invert(1)", opacity: 0.8 }} />
+            <span style={{ color: C.text2, fontSize: 11, fontWeight: 600, whiteSpace: "nowrap" }}>Sooru.AI</span>
+          </div>
+        ) : (
+          <div style={{ padding: "8px 0", borderBottom: `1px solid ${C.border}`, display: "flex", justifyContent: "center", flexShrink: 0 }}>
+            <img src="/sooru-logo.png" alt="Sooru" style={{ height: 16, objectFit: "contain", filter: "brightness(0) invert(1)", opacity: 0.5 }} />
+          </div>
+        )}
+
+        {/* ── New Analysis ── */}
+        <div style={{ padding: sideOpen ? "10px 10px 6px" : "10px 0 6px", display: "flex", justifyContent: "center", flexShrink: 0 }}>
+          {sideOpen ? (
+            <button onClick={newAnalysis}
+              style={{ width: "100%", padding: "9px 14px", background: C.greenSubtle, border: `1px solid ${C.greenBorder}`, borderRadius: 9, color: C.green, cursor: "pointer", fontSize: 13, fontWeight: 700, fontFamily: F.sans, display: "flex", alignItems: "center", gap: 8, transition: "all 0.15s" }}
+              onMouseEnter={e => e.currentTarget.style.background = C.greenGlow}
+              onMouseLeave={e => e.currentTarget.style.background = C.greenSubtle}>
+              <PlusIcon /> New Analysis
+            </button>
+          ) : (
+            iconBtn(newAnalysis, "New Analysis", <PlusIcon />)
+          )}
+        </div>
+
+        {/* ── Chats ── */}
+        <div style={{ flex: 1, overflowY: "auto", padding: sideOpen ? "4px 8px" : "4px 0" }}>
+          {sideOpen ? (
+            <>
+              <div style={{ fontSize: 10, fontWeight: 600, color: C.text3, padding: "6px 8px 5px", letterSpacing: "0.1em", textTransform: "uppercase" }}>Recent</div>
+              {chats.length === 0 && <div style={{ padding: "10px 8px", fontSize: 12, color: C.text3 }}>No analyses yet</div>}
+              {chats.map(chat => (
+                <div key={chat.id} style={{ position: "relative", marginBottom: 1 }}>
+                  <button onClick={() => openChat(chat)} onContextMenu={e => handleCtx(e, chat)}
+                    style={{ width: "100%", padding: "8px 30px 8px 10px", background: currentProjectId === chat.id ? C.bg2 : "transparent", border: "none", borderRadius: 7, color: currentProjectId === chat.id ? C.text1 : C.text2, cursor: "pointer", textAlign: "left", fontFamily: F.sans, fontSize: 13, display: "flex", alignItems: "center", gap: 8, transition: "all 0.1s" }}
+                    onMouseEnter={e => { if (currentProjectId !== chat.id) { e.currentTarget.style.background = C.bg2; e.currentTarget.style.color = C.text1; } }}
+                    onMouseLeave={e => { if (currentProjectId !== chat.id) { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = C.text2; } }}>
+                    <ChatIcon />
+                    <div style={{ flex: 1, overflow: "hidden" }}>
+                      <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{chat.title}</div>
+                      <div style={{ fontSize: 10, color: C.text3, marginTop: 1 }}>{chat.date}</div>
+                    </div>
+                  </button>
+                  <button onClick={e => handleCtx(e, chat)}
+                    style={{ position: "absolute", right: 4, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: C.text3, cursor: "pointer", padding: 2, opacity: 0.4, transition: "opacity 0.15s" }}
+                    onMouseEnter={e => e.currentTarget.style.opacity = 1}
+                    onMouseLeave={e => e.currentTarget.style.opacity = 0.4}>
+                    <MoreIcon />
+                  </button>
+                </div>
+              ))}
+            </>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", paddingTop: 4 }}>
+              <div style={{ position: "relative" }}>
+                {iconBtn(() => setSideOpen(true), "Conversations", <ChatIcon />)}
+                {chats.length > 0 && (
+                  <div style={{ position: "absolute", top: 5, right: 5, minWidth: 16, height: 16, borderRadius: 8, background: C.green, color: "#111", fontSize: 9, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 3px", pointerEvents: "none" }}>
+                    {chats.length > 9 ? "9+" : chats.length}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ── Sign Out ── */}
+        <div style={{ padding: sideOpen ? "8px 10px" : "8px 0", borderTop: `1px solid ${C.border}`, display: "flex", justifyContent: "center", flexShrink: 0 }}>
+          {sideOpen ? (
+            <button onClick={logout}
+              style={{ width: "100%", padding: "8px 12px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 8, color: C.text3, cursor: "pointer", fontSize: 12, fontFamily: F.sans, fontWeight: 500, display: "flex", alignItems: "center", gap: 8, transition: "all 0.15s" }}
+              onMouseEnter={e => { e.currentTarget.style.color = C.err; e.currentTarget.style.borderColor = C.err; e.currentTarget.style.background = "rgba(255,90,90,0.06)"; }}
+              onMouseLeave={e => { e.currentTarget.style.color = C.text3; e.currentTarget.style.borderColor = C.border; e.currentTarget.style.background = "transparent"; }}>
+              <LogoutIcon /> Sign Out
+            </button>
+          ) : (
+            iconBtn(logout, "Sign Out", <LogoutIcon />, true)
+          )}
         </div>
       </div>
 
-      {/* Mobile sidebar overlay */}
+      {/* Mobile overlay */}
       {isMob && sideOpen && <div onClick={() => setSideOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 99 }} />}
 
       {/* ── Main area ── */}
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+      <div style={{ marginLeft: isMob ? 0 : sidebarW + 20, height: "100vh", display: "flex", flexDirection: "column", overflow: "hidden", transition: "margin-left 0.25s cubic-bezier(0.4,0,0.2,1)" }}>
         {/* Topbar */}
         <div style={{ height: 50, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 16px", borderBottom: `1px solid ${C.border}`, flexShrink: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
