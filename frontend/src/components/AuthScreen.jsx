@@ -64,13 +64,20 @@ export default function AuthScreen({ onLogin }) {
       <div style={{ position: "fixed", inset: 0, opacity: 0.02, backgroundImage: `linear-gradient(${C.green} 1px, transparent 1px), linear-gradient(90deg, ${C.green} 1px, transparent 1px)`, backgroundSize: "50px 50px", pointerEvents: "none" }} />
       <div style={{ width: "100%", maxWidth: 420, position: "relative", zIndex: 1, animation: "fadeUp 0.5s ease" }}>
         <div style={{ textAlign: "center", marginBottom: 32 }}>
-          <div style={{ display: "inline-flex", justifyContent: "center", marginBottom: 16 }}><SchucoFull h={28} /></div>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 6 }}>
-            <div style={{ height: 1, width: 32, background: C.border2 }} />
-            <span style={{ fontSize: 22, fontWeight: 700, color: C.text1, letterSpacing: "-0.03em" }}>TenderIQ</span>
-            <div style={{ height: 1, width: 32, background: C.border2 }} />
+          {/* TenderIQ logo + name */}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, marginBottom: 0 }}>
+            <img src="/teiq.png" alt="TenderIQ" style={{ height: 36, width: "auto", objectFit: "contain" }} />
+            <span style={{ fontSize: 26, fontWeight: 700, color: C.text1, letterSpacing: "-0.03em" }}>TenderIQ</span>
           </div>
-          <div style={{ fontSize: 10, color: C.text3, letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 500 }}>Smart Tender Analysis</div>
+          {/* Schüco × Sooru */}
+          <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 14, marginTop: -30 }}>
+            <img src="/schu.png" alt="Schüco" style={{ height: 125, width: "auto", objectFit: "contain" }} />
+            <span style={{ fontSize: 20, color: "rgba(255,255,255,0.7)", fontWeight: 300, lineHeight: 1 }}>×</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <img src="/suru.png" alt="Sooru" style={{ height: 25, width: "auto", objectFit: "contain" }} />
+              <span style={{ fontSize: 16, fontWeight: 600, color: C.text1, letterSpacing: "-0.01em" }}>Sooru.AI</span>
+            </div>
+          </div>
         </div>
 
         <div style={{ background: C.bg1, borderRadius: 16, padding: "30px 28px", border: `1px solid ${C.border}`, boxShadow: "0 24px 64px rgba(0,0,0,0.4)" }}>

@@ -62,6 +62,11 @@ export default function TenderIQ() {
   const [isTyping, setIsTyping] = useState(false);
   const [typingStage, setTypingStage] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
+  const [panelPos, setPanelPos] = useState(null); // {x, y} — null = default position
+  const [panelWidth, setPanelWidth] = useState(400);
+  const [panelHeight, setPanelHeight] = useState(null); // null = full height
+  const panelDragRef = useRef(null);
+  const resizeState = useRef(null);
   const [ctxMenu, setCtxMenu] = useState(null);
   const [renameModal, setRenameModal] = useState(null);
   const [deleteModal, setDeleteModal] = useState(null);
@@ -71,6 +76,7 @@ export default function TenderIQ() {
   const [chatCounts, setChatCounts] = useState({});
   const fileRef = useRef(null);
   const chatEnd = useRef(null);
+  const dragState = useRef(null);
 
   // Responsive
   useEffect(() => {
@@ -89,6 +95,44 @@ export default function TenderIQ() {
       if (userMsgs > 0) setChatCounts(prev => ({ ...prev, [currentProjectId]: userMsgs }));
     }
   }, [msgs, currentProjectId]);
+
+  // Panel drag handlers
+  const onPanelMouseDown = (e) => {
+    e.preventDefault();
+    const panel = panelDragRef.current;
+    if (!panel) return;
+    const rect = panel.getBoundingClientRect();
+    dragState.current = { startX: e.clientX - rect.left, startY: e.clientY - rect.top };
+    const onMove = (ev) => {
+      const x = Math.max(0, Math.min(window.innerWidth - rect.width, ev.clientX - dragState.current.startX));
+      const y = Math.max(0, Math.min(window.innerHeight - 60, ev.clientY - dragState.current.startY));
+      setPanelPos({ x, y });
+    };
+    const onUp = () => { document.removeEventListener("mousemove", onMove); document.removeEventListener("mouseup", onUp); };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  };
+
+  const onResizeMouseDown = (e, dir) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const panel = panelDragRef.current;
+    if (!panel) return;
+    const rect = panel.getBoundingClientRect();
+    const startX = e.clientX, startY = e.clientY;
+    const startW = rect.width, startH = rect.height;
+    const startLeft = rect.left, startTop = rect.top;
+    const onMove = (ev) => {
+      const dx = ev.clientX - startX, dy = ev.clientY - startY;
+      if (dir.includes("e")) setPanelWidth(w => Math.max(300, Math.min(900, startW + dx)));
+      if (dir.includes("w")) { setPanelWidth(Math.max(300, Math.min(900, startW - dx))); setPanelPos(p => ({ x: Math.max(0, startLeft + dx), y: p ? p.y : startTop })); }
+      if (dir.includes("s")) setPanelHeight(Math.max(200, Math.min(window.innerHeight - 20, startH + dy)));
+      if (dir.includes("n")) { setPanelHeight(Math.max(200, Math.min(window.innerHeight - 20, startH - dy))); setPanelPos(p => ({ x: p ? p.x : startLeft, y: Math.max(0, startTop + dy) })); }
+    };
+    const onUp = () => { document.removeEventListener("mousemove", onMove); document.removeEventListener("mouseup", onUp); };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  };
 
   // Project history is loaded on login, no need to reload on mount
 
@@ -248,15 +292,13 @@ export default function TenderIQ() {
       }}>
 
         {/* ── Header: TenderIQ + Partnership ── */}
-        <div style={{ padding: sideOpen ? "14px 12px 12px" : "12px 0 10px", borderBottom: `1px solid ${C.border}`, flexShrink: 0 }}>
+        <div style={{ padding: sideOpen ? "14px 12px 4px" : "12px 0 10px", borderBottom: `1px solid ${C.border}`, flexShrink: 0 }}>
           {sideOpen ? (
             <>
-              {/* Row 1: Logo + Title + Collapse */}
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
-                  <div style={{ width: 34, height: 34, borderRadius: 10, background: "rgba(59,130,246,0.12)", border: "1px solid rgba(59,130,246,0.25)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, overflow: "hidden" }}>
-                    <img src="/tenderIQ.png" alt="TenderIQ" style={{ width: 24, height: 24, objectFit: "contain" }} />
-                  </div>
+              {/* Row 1: TenderIQ logo + name + collapse */}
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <img src="/teiq.png" alt="TenderIQ" style={{ height: 26, width: "auto", objectFit: "contain" }} />
                   <span style={{ fontSize: 15, fontWeight: 700, color: C.text1, whiteSpace: "nowrap", letterSpacing: "-0.02em" }}>TenderIQ</span>
                 </div>
                 <button onClick={() => setSideOpen(false)}
@@ -266,29 +308,23 @@ export default function TenderIQ() {
                   <ChevronLeftIcon />
                 </button>
               </div>
-              {/* Row 2: Schüco × Sooru (same section, no border) */}
-              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <div style={{ background: "white", borderRadius: 4, padding: "2px 5px", display: "flex", alignItems: "center", flexShrink: 0 }}>
-                  <img src="/schueco-logo.png" alt="Schüco" style={{ height: 13, objectFit: "contain" }} />
-                </div>
-                <span style={{ color: C.text3, fontSize: 13, fontWeight: 700, flexShrink: 0 }}>×</span>
-                <div style={{ background: "white", borderRadius: 4, padding: "2px 4px", display: "flex", alignItems: "center", flexShrink: 0 }}>
-                  <img src="/sooru-logo.png" alt="Sooru" style={{ height: 16, objectFit: "contain" }} />
-                </div>
-                <span style={{ color: C.text2, fontSize: 11, fontWeight: 600, whiteSpace: "nowrap" }}>Sooru.AI</span>
+              {/* Row 2: Schüco × Sooru */}
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: -14 }}>
+                <img src="/schu.png" alt="Schüco" style={{ height: 40, width: "auto", objectFit: "contain" }} />
+                <span style={{ color: "rgba(255,255,255,0.5)", fontSize: 12, fontWeight: 300 }}>×</span>
+                <img src="/suru.png" alt="Sooru" style={{ height: 10, width: "auto", objectFit: "contain" }} />
+                <span style={{ color: C.text2, fontSize: 10, fontWeight: 600, whiteSpace: "nowrap" }}>Sooru.AI</span>
               </div>
             </>
           ) : (
-            /* Collapsed: logo + expand button */
-            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
-              <div style={{ width: 34, height: 34, borderRadius: 10, background: "rgba(59,130,246,0.12)", border: "1px solid rgba(59,130,246,0.25)", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
-                <img src="/tenderIQ.png" alt="TenderIQ" style={{ width: 24, height: 24, objectFit: "contain" }} />
-              </div>
+            /* Collapsed: teiq logo + expand button (inline) */
+            <div style={{ display: "flex", flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 4 }}>
+              <img src="/teiq.png" alt="TenderIQ" style={{ height: 22, width: "auto", objectFit: "contain", flexShrink: 0 }} />
               <button onClick={() => setSideOpen(true)} title="Expand"
-                style={{ background: "none", border: `1px solid ${C.border}`, borderRadius: 6, color: C.text3, cursor: "pointer", padding: "2px 10px", display: "flex", alignItems: "center", justifyContent: "center", transition: "all 0.15s" }}
+                style={{ background: "none", border: `1px solid ${C.border}`, borderRadius: 5, color: C.text3, cursor: "pointer", padding: "1px 4px", display: "flex", alignItems: "center", justifyContent: "center", transition: "all 0.15s", flexShrink: 0 }}
                 onMouseEnter={e => { e.currentTarget.style.color = C.text1; e.currentTarget.style.borderColor = C.text2; }}
                 onMouseLeave={e => { e.currentTarget.style.color = C.text3; e.currentTarget.style.borderColor = C.border; }}>
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
               </button>
             </div>
           )}
@@ -322,11 +358,6 @@ export default function TenderIQ() {
                     onMouseLeave={e => { if (currentProjectId !== chat.id) { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = C.text2; } }}>
                     <div style={{ position: "relative", flexShrink: 0 }}>
                       <ChatIcon />
-                      {chatCounts[chat.id] > 0 && (
-                        <div style={{ position: "absolute", top: -5, right: -6, minWidth: 14, height: 14, borderRadius: 7, background: C.green, color: "#111", fontSize: 8, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 2px" }}>
-                          {chatCounts[chat.id]}
-                        </div>
-                      )}
                     </div>
                     <div style={{ flex: 1, overflow: "hidden" }}>
                       <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{chat.title}</div>
@@ -355,11 +386,6 @@ export default function TenderIQ() {
                     onMouseLeave={e => { if (currentProjectId !== chat.id) { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = C.text3; } }}>
                     <ChatIcon />
                   </button>
-                  {chatCounts[chat.id] > 0 && (
-                    <div style={{ position: "absolute", top: 4, right: 4, minWidth: 15, height: 15, borderRadius: 8, background: C.green, color: "#111", fontSize: 8, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 2px", pointerEvents: "none" }}>
-                      {chatCounts[chat.id] > 9 ? "9+" : chatCounts[chat.id]}
-                    </div>
-                  )}
                 </div>
               ))}
             </div>
@@ -551,12 +577,55 @@ export default function TenderIQ() {
             </div>
           </div>
 
-          {/* Results panel — desktop */}
-          {showResults && !isMob && (
-            <div style={{ width: 380, minWidth: 380, overflow: "hidden", animation: "slideIn 0.25s ease" }}>
-              <ResultsPanel token={token} projectId={currentProjectId} projectName={currentProjectName} onClose={() => setShowResults(false)} isMobile={false} />
-            </div>
-          )}
+          {/* Results panel — desktop (draggable + resizable floating) */}
+          {showResults && !isMob && (() => {
+            const H = 6, C2 = 10; // handle thickness, corner size
+            const hl = (cursor, style, dir) => (
+              <div key={dir} onMouseDown={e => onResizeMouseDown(e, dir)}
+                style={{ position: "absolute", cursor, zIndex: 10, ...style }}
+                onMouseEnter={e => e.currentTarget.style.background = "rgba(100,220,100,0.18)"}
+                onMouseLeave={e => e.currentTarget.style.background = "transparent"} />
+            );
+            return (
+              <div ref={panelDragRef}
+                style={{
+                  position: "fixed",
+                  top: panelPos ? panelPos.y : 10,
+                  right: panelPos ? "auto" : 10,
+                  left: panelPos ? panelPos.x : "auto",
+                  width: panelWidth,
+                  height: panelHeight ? panelHeight : "calc(100vh - 20px)",
+                  borderRadius: 18,
+                  overflow: "hidden",
+                  boxShadow: "0 8px 40px rgba(0,0,0,0.55)",
+                  border: `1px solid ${C.border}`,
+                  zIndex: 150,
+                  animation: "slideIn 0.25s ease",
+                  display: "flex",
+                  flexDirection: "column",
+                }}>
+                {/* Edge handles */}
+                {hl("ew-resize", { left: 0, top: C2, bottom: C2, width: H }, "w")}
+                {hl("ew-resize", { right: 0, top: C2, bottom: C2, width: H }, "e")}
+                {hl("ns-resize", { top: 0, left: C2, right: C2, height: H }, "n")}
+                {hl("ns-resize", { bottom: 0, left: C2, right: C2, height: H }, "s")}
+                {/* Corner handles */}
+                {hl("nw-resize", { top: 0, left: 0, width: C2, height: C2 }, "nw")}
+                {hl("ne-resize", { top: 0, right: 0, width: C2, height: C2 }, "ne")}
+                {hl("sw-resize", { bottom: 0, left: 0, width: C2, height: C2 }, "sw")}
+                {hl("se-resize", { bottom: 0, right: 0, width: C2, height: C2 }, "se")}
+                {/* Drag handle */}
+                <div onMouseDown={onPanelMouseDown}
+                  style={{ height: 28, background: C.navyDark, display: "flex", alignItems: "center", justifyContent: "center", cursor: "grab", flexShrink: 0, borderBottom: `1px solid ${C.border}` }}>
+                  <div style={{ width: 36, height: 4, borderRadius: 2, background: C.border }} />
+                </div>
+                <div style={{ flex: 1, overflow: "hidden" }}>
+                  <ResultsPanel token={token} projectId={currentProjectId} projectName={currentProjectName}
+                    onClose={() => { setShowResults(false); setPanelPos(null); setPanelWidth(400); setPanelHeight(null); }} isMobile={false} />
+                </div>
+              </div>
+            );
+          })()}
         </div>
       </div>
 
@@ -590,23 +659,14 @@ export default function TenderIQ() {
       {/* ── Analysing overlay ── */}
       {isTyping && msgs.some(m => m.type === "file") && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(10,14,20,0.85)", zIndex: 500, display: "flex", alignItems: "center", justifyContent: "center", backdropFilter: "blur(4px)", animation: "fadeUp 0.3s ease" }}>
-          <div style={{ background: C.bg1, borderRadius: 20, padding: "40px 48px", border: `1px solid ${C.border}`, textAlign: "center", maxWidth: 420, width: "90%" }}>
-            <div style={{ width: 56, height: 56, borderRadius: 14, background: C.greenSubtle, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 24px", border: `1px solid ${C.greenBorder}` }}>
-              <SchucoMark />
+          <div style={{ background: C.bg1, borderRadius: 20, padding: "44px 52px", border: `1px solid ${C.border}`, textAlign: "center", maxWidth: 380, width: "90%" }}>
+            <div style={{ fontSize: 22, fontWeight: 700, color: C.text1, marginBottom: 6, letterSpacing: "-0.02em" }}>Analysing</div>
+            <div style={{ fontSize: 13, color: C.text3, marginBottom: 32 }}>Reading your document&hellip;</div>
+            {/* Scanner line */}
+            <div style={{ height: 3, background: C.bg2, borderRadius: 3, overflow: "hidden", position: "relative" }}>
+              <div style={{ position: "absolute", top: 0, left: 0, height: "100%", width: "40%", borderRadius: 3, background: `linear-gradient(90deg, transparent, ${C.green}, transparent)`, animation: "scanner 1.6s ease-in-out infinite" }} />
             </div>
-            <div style={{ fontSize: 20, fontWeight: 700, color: C.text1, marginBottom: 8 }}>Analysing Document</div>
-            <div style={{ fontSize: 13, color: C.text2, marginBottom: 28, lineHeight: 1.5 }}>{STAGES[typingStage]}&hellip;</div>
-            {/* Progress bar */}
-            <div style={{ height: 4, background: C.border, borderRadius: 2, overflow: "hidden", marginBottom: 12 }}>
-              <div style={{ height: "100%", background: `linear-gradient(90deg, ${C.green}, ${C.accentHover})`, borderRadius: 2, width: `${((typingStage + 1) / STAGES.length) * 100}%`, transition: "width 0.8s ease" }} />
-            </div>
-            <div style={{ fontSize: 11, color: C.text3 }}>Step {typingStage + 1} of {STAGES.length}</div>
-            {/* Dots */}
-            <div style={{ display: "flex", justifyContent: "center", gap: 6, marginTop: 20 }}>
-              {[0, 1, 2].map(i => (
-                <div key={i} style={{ width: 8, height: 8, borderRadius: "50%", background: C.green, animation: `pulse 1.2s ease ${i * 0.2}s infinite` }} />
-              ))}
-            </div>
+            <style>{`@keyframes scanner { 0% { left: -40%; } 100% { left: 140%; } }`}</style>
           </div>
         </div>
       )}

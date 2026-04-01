@@ -122,16 +122,17 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
       const img = new Image(); img.crossOrigin = "anonymous";
       img.onload = () => {
         const c = document.createElement("canvas");
-        c.width = img.width; c.height = img.height;
+        c.width = img.naturalWidth; c.height = img.naturalHeight;
         c.getContext("2d").drawImage(img, 0, 0);
-        res(c.toDataURL("image/png"));
+        res({ data: c.toDataURL("image/png"), w: img.naturalWidth, h: img.naturalHeight });
       };
       img.src = src;
     });
 
-    const [schuecoData, sooruData] = await Promise.all([
-      loadImg("/schueco-logo.png"),
-      loadImg("/sooru-logo.png"),
+    const [schuecoData, sooruData, teiqData] = await Promise.all([
+      loadImg("/schu.png"),
+      loadImg("/suru.png"),
+      loadImg("/teiq.png"),
     ]);
 
     const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
@@ -139,44 +140,47 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
 
     // ── Dark header band ──
     doc.setFillColor(10, 14, 20);
-    doc.rect(0, 0, W, 38, "F");
+    doc.rect(0, 0, W, 54, "F");
 
-    // TenderIQ title
+    const cx = W / 2;
+
+    // Aspect-correct sizing helpers
+    const schuH = 16; const schuW = (schuecoData.w / schuecoData.h) * schuH;
+    const suruH = 8;  const suruW = (sooruData.w  / sooruData.h)  * suruH;
+    const teiqH = 10; const teiqW = (teiqData.w   / teiqData.h)   * teiqH;
+
+    // Row 1: TenderIQ logo + name (centered)
+    const row1W = teiqW + 3 + 28;
+    const row1X = cx - row1W / 2;
+    doc.addImage(teiqData.data, "PNG", row1X, 6, teiqW, teiqH);
     doc.setFont("helvetica", "bold");
-    doc.setFontSize(22);
+    doc.setFontSize(18);
     doc.setTextColor(255, 255, 255);
-    doc.text("TenderIQ", 14, 16);
+    doc.text("TenderIQ", row1X + teiqW + 3, 14);
 
-    // Schüco logo (white bg pill)
-    doc.setFillColor(255, 255, 255);
-    doc.roundedRect(14, 20, 34, 10, 2, 2, "F");
-    doc.addImage(schuecoData, "PNG", 15, 21, 32, 8);
+    // Row 2: schu (bigger) + × + suru + "Sooru.AI" (centered)
+    const row2W = schuW + 6 + 5 + 6 + suruW + 4 + 16;
+    const row2X = cx - row2W / 2;
+    const row2Y = 22;
+    doc.addImage(schuecoData.data, "PNG", row2X, row2Y, schuW, schuH);
+    doc.setFontSize(11); doc.setTextColor(180, 180, 180);
+    doc.text("×", row2X + schuW + 3, row2Y + schuH / 2 + 1.5);
+    doc.addImage(sooruData.data, "PNG", row2X + schuW + 9, row2Y + (schuH - suruH) / 2, suruW, suruH);
+    doc.setFontSize(9); doc.setTextColor(200, 200, 200);
+    doc.text("Sooru.AI", row2X + schuW + 9 + suruW + 3, row2Y + schuH / 2 + 1.5);
 
-    // × separator
-    doc.setFontSize(13); doc.setTextColor(120, 120, 120);
-    doc.text("×", 51, 28);
-
-    // Sooru logo (white bg pill)
-    doc.setFillColor(255, 255, 255);
-    doc.roundedRect(56, 20, 10, 10, 2, 2, "F");
-    doc.addImage(sooruData, "PNG", 57, 21, 8, 8);
-
-    // Sooru.AI text
-    doc.setFontSize(10); doc.setTextColor(200, 200, 200);
-    doc.text("Sooru.AI", 69, 28);
-
-    // Project name subheading
+    // Project name subheading (centered)
     doc.setFontSize(10); doc.setFont("helvetica", "normal"); doc.setTextColor(160, 160, 160);
-    doc.text(projectName || "Analysis Results", 14, 46);
+    doc.text(projectName || "Analysis Results", cx, 62, { align: "center" });
 
-    // Summary line
+    // Summary line (centered)
     const foundCount = params.filter(p => p.available).length;
     doc.setFontSize(9); doc.setTextColor(100, 100, 100);
-    doc.text(`${foundCount} Found  ·  ${params.length - foundCount} Not Available  ·  Generated ${new Date().toLocaleDateString()}`, 14, 52);
+    doc.text(`${foundCount} Found  ·  ${params.length - foundCount} Not Available  ·  Generated ${new Date().toLocaleDateString()}`, cx, 68, { align: "center" });
 
     // Parameters table
     autoTable(doc, {
-      startY: 57,
+      startY: 73,
       head: [tableHead],
       body: tableRows(),
       styles: { fontSize: 8.5, cellPadding: 3, overflow: "linebreak" },
@@ -351,11 +355,16 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
                 <div style={{ fontSize: 11, color: C.text3, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>{popup.label}</div>
                 <div style={{ fontSize: 11, color: C.text3 }}>{popup.unit}</div>
               </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <div style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "4px 10px", borderRadius: 12, background: `${confidenceColor(popup.confidence)}15`, fontSize: 12, fontWeight: 700, color: confidenceColor(popup.confidence) }}>
                   <div style={{ width: 6, height: 6, borderRadius: "50%", background: confidenceColor(popup.confidence) }} />
                   {popup.confidence}% confidence
                 </div>
+                {popup.page && (
+                  <span style={{ display: "inline-flex", alignItems: "center", padding: "4px 10px", background: C.greenSubtle, border: `1px solid ${C.greenBorder}`, borderRadius: 12, fontSize: 11, fontWeight: 600, color: C.green }}>
+                    Pg. {popup.page}
+                  </span>
+                )}
                 <button onClick={() => setPopup(null)} style={{ background: "none", border: "none", color: C.text3, cursor: "pointer", padding: 2, display: "flex" }}>
                   <CloseIcon />
                 </button>
@@ -366,16 +375,9 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
               <div style={{ fontSize: 22, color: C.text1, fontWeight: 700, fontFamily: F.mono, marginBottom: 16, wordBreak: "break-word", lineHeight: 1.4 }}>
                 {popup.value}
               </div>
-              {(popup.page || popup.section) && (
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
-                  {popup.page && (
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: 3, padding: "3px 10px", background: C.greenSubtle, border: `1px solid ${C.greenBorder}`, borderRadius: 6, fontSize: 11, fontWeight: 600, color: C.green }}>
-                      Page {popup.page}
-                    </span>
-                  )}
-                  {popup.section && (
-                    <span style={{ fontSize: 11, color: C.text2, lineHeight: 1.4 }}>{popup.section}</span>
-                  )}
+              {popup.section && (
+                <div style={{ marginBottom: 14 }}>
+                  <span style={{ fontSize: 11, color: C.text2, lineHeight: 1.4 }}>{popup.section}</span>
                 </div>
               )}
               {popup.notes && (
