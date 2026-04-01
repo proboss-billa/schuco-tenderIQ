@@ -1,6 +1,4 @@
 # extraction/parameter_extractor.py
-
-from typing import List, Dict, Optional
 import json
 
 from config.parameters import FACADE_PARAMETERS
@@ -14,6 +12,9 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from google.genai.errors import ClientError
 
 from processing.document_processor import logger
+
+import asyncio
+from typing import Dict, List
 
 class ParameterExtractor:
     """Extract facade parameters using LLM"""
@@ -151,6 +152,95 @@ Set "found" to true only if the parameter is clearly present in the context.
 
         return chunks_with_scores
 
+
+    # --- Async versions of your two I/O-bound methods ---
+
+    async def _search_relevant_chunks_async(
+            self, project_id: str, query: str, top_k: int = 5
+    ) -> List[Dict]:
+        """Async wrapper — run the blocking DB/vector search in a thread."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,  # uses default ThreadPoolExecutor
+            self._search_relevant_chunks,  # your existing sync method
+            project_id, query, top_k
+        )
+
+    async def _llm_extract_async(
+            self, param_config: Dict, relevant_chunks: List[Dict]
+    ) -> Dict:
+        """Async wrapper — run the blocking LLM call in a thread."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            self._llm_extract,  # your existing sync method
+            param_config, relevant_chunks
+        )
+
+    # --- Core: one param end-to-end, async ---
+
+    async def extract_single_parameter_async(
+            self,
+            project_id: str,
+            param_config: Dict,
+            semaphore: asyncio.Semaphore,
+    ) -> Dict:
+        async with semaphore:  # rate-limit concurrent LLM calls
+            query = (
+                f"{param_config['description']} "
+                f"{' '.join(param_config['search_keywords'])}"
+            )
+
+            relevant_chunks = await self._search_relevant_chunks_async(
+                project_id, query, top_k=5
+            )
+
+            if not relevant_chunks:
+                return {
+                    "parameter_name": param_config["name"],
+                    "found": False,
+                    "reason": "No relevant content found",
+                }
+
+            return await self._llm_extract_async(param_config, relevant_chunks)
+
+    # --- Public entry point: replaces your sequential for-loop ---
+
+    async def extract_all_parameters_async(
+            self,
+            project_id: str,
+            facade_parameters: List[Dict],
+            max_concurrent: int = 5,  # tune to your LLM rate limit
+    ) -> List[Dict]:
+        semaphore = asyncio.Semaphore(max_concurrent)
+
+        tasks = [
+            self.extract_single_parameter_async(project_id, param, semaphore)
+            for param in facade_parameters
+        ]
+
+        # return_exceptions=True prevents one failure killing all others
+        raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        results = []
+        for param_config, result in zip(facade_parameters, raw_results):
+            if isinstance(result, Exception):
+                logger.error(f"Failed {param_config['name']}: {result}")
+                result = {
+                    "parameter_name": param_config["name"],
+                    "found": False,
+                    "reason": f"Exception: {result}",
+                }
+            else:
+                logger.info(f"Extracted {param_config['name']}: {result}")
+
+            results.append(result)
+
+            if result.get("found"):
+                self._store_extraction(project_id, param_config, result)
+
+        return results
+
     def _llm_extract(self, param_config: Dict, relevant_chunks: List[Dict]) -> Dict:
         """Use LLM to extract parameter value"""
 
@@ -168,36 +258,6 @@ Set "found" to true only if the parameter is clearly present in the context.
             )
 
         context = "\n\n".join(context_parts)
-
-        # response = self.extract_facade_parameter(param_config, context)
-        #
-        # # Parse JSON response
-        # try:
-        #     result = json.loads(response.content[0].text)
-        #
-        #     # Add source metadata
-        #     if result.get('found') and result.get('source_number'):
-        #         source_idx = result['source_number'] - 1
-        #         if source_idx < len(relevant_chunks):
-        #             source_chunk = relevant_chunks[source_idx]['chunk']
-        #             result['source_metadata'] = {
-        #                 'document_id': str(source_chunk.document_id),
-        #                 'document_name': source_chunk.document.original_filename,
-        #                 'page': source_chunk.page_number,
-        #                 'section': source_chunk.section_title,
-        #                 'subsection': source_chunk.subsection_title,
-        #                 'chunk_id': str(source_chunk.chunk_id)
-        #             }
-        #
-        #     result['parameter_name'] = param_config['name']
-        #     return result
-        #
-        # except json.JSONDecodeError:
-        #     return {
-        #         'parameter_name': param_config['name'],
-        #         'found': False,
-        #         'reason': 'LLM response parsing failed'
-        #     }
 
         try:
             # 1. Call the updated extraction method (using gemini-3.1-flash-preview)

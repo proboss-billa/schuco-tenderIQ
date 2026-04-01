@@ -6,7 +6,7 @@
   <component name="ChangeListManager">
     <list default="true" id="65f78ced-6437-4443-b0cd-c25f85f70526" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/frontend/.env.local" beforeDir="false" afterPath="$PROJECT_DIR$/frontend/.env.local" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/extraction/parameter_extractor.py" beforeDir="false" afterPath="$PROJECT_DIR$/extraction/parameter_extractor.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -72,5 +72,16 @@
         </entry>
       </map>
     </option>
+  </component>
+  <component name="XDebuggerManager">
+    <breakpoint-manager>
+      <breakpoints>
+        <line-breakpoint enabled="true" suspend="THREAD" type="python-line">
+          <url>file://$PROJECT_DIR$/config/parameters.py</url>
+          <line>2</line>
+          <option name="timeStamp" value="2" />
+        </line-breakpoint>
+      </breakpoints>
+    </breakpoint-manager>
   </component>
 </project>

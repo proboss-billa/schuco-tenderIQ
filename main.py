@@ -2,6 +2,9 @@
 import os
 import traceback
 from dotenv import load_dotenv
+
+from config.parameters import FACADE_PARAMETERS
+
 load_dotenv()
 from datetime import datetime
 
@@ -200,7 +203,8 @@ async def process_project(project_id: uuid.UUID, db: Session = Depends(get_db)):
             # llm_client=llm_client,
             db_session=db,
         )
-        extractions = extractor.extract_all_parameters(str(project_id))
+        # extractions = extractor.extract_all_parameters(str(project_id))
+        extractions = await extractor.extract_all_parameters_async(str(project_id), facade_parameters=FACADE_PARAMETERS)
 
         project.processing_status = "completed"
         project.processing_completed_at = datetime.now()
