@@ -18,10 +18,10 @@ from processing.document_processor import logger
 class ParameterExtractor:
     """Extract facade parameters using LLM"""
 
-    def __init__(self, pinecone_index, embedding_client, llm_client, db_session):
+    def __init__(self, pinecone_index, embedding_client, db_session):
         self.pinecone = pinecone_index
         self.embedder = embedding_client
-        self.llm = llm_client
+        # self.llm = llm_client
         self.db = db_session
         self.gemini = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 

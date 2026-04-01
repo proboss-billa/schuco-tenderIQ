@@ -37,12 +37,12 @@ PARAM_BATCH_SIZE = 1800  # chunks sent per LLM parameter-extraction call
 class DocumentProcessor:
     """Main processing orchestrator"""
 
-    def __init__(self, project_id: uuid.UUID, db_session, pinecone_index, embedding_client, llm_client):
+    def __init__(self, project_id: uuid.UUID, db_session, pinecone_index, embedding_client):
         self.project_id = project_id
         self.db = db_session
         self.pinecone = pinecone_index
         self.embedder = embedding_client
-        self.llm = llm_client
+        # self.llm = llm_client
         self.gemini_llm_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 

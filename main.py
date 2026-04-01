@@ -190,14 +190,14 @@ async def process_project(project_id: uuid.UUID, db: Session = Depends(get_db)):
             db_session=db,
             pinecone_index=pinecone_index,
             embedding_client=embedding_client,
-            llm_client=llm_client,
+            # llm_client=llm_client,
         )
         processor.process_all_documents()
 
         extractor = ParameterExtractor(
             pinecone_index=pinecone_index,
             embedding_client=embedding_client,
-            llm_client=llm_client,
+            # llm_client=llm_client,
             db_session=db,
         )
         extractions = extractor.extract_all_parameters(str(project_id))
