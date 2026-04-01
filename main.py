@@ -5,7 +5,6 @@ from dotenv import load_dotenv
 load_dotenv()
 from datetime import datetime
 
-import anthropic
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List

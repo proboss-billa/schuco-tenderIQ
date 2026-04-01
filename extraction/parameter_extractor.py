@@ -1,7 +1,6 @@
 # extraction/parameter_extractor.py
 
 from typing import List, Dict, Optional
-import anthropic
 import json
 
 from config.parameters import FACADE_PARAMETERS
