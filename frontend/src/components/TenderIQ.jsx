@@ -68,6 +68,7 @@ export default function TenderIQ() {
   const [currentProjectId, setCurrentProjectId] = useState(null);
   const [currentProjectName, setCurrentProjectName] = useState("");
   const [chats, setChats] = useState([]);
+  const [chatCounts, setChatCounts] = useState({});
   const fileRef = useRef(null);
   const chatEnd = useRef(null);
 
@@ -80,6 +81,14 @@ export default function TenderIQ() {
 
   // Auto-scroll
   useEffect(() => { chatEnd.current?.scrollIntoView({ behavior: "smooth" }); }, [msgs, isTyping]);
+
+  // Track per-project chat counts
+  useEffect(() => {
+    if (currentProjectId) {
+      const userMsgs = msgs.filter(m => m.role === "user").length;
+      if (userMsgs > 0) setChatCounts(prev => ({ ...prev, [currentProjectId]: userMsgs }));
+    }
+  }, [msgs, currentProjectId]);
 
   // Project history is loaded on login, no need to reload on mount
 
@@ -238,37 +247,52 @@ export default function TenderIQ() {
         zIndex: 100,
       }}>
 
-        {/* ── Header: TenderIQ ── */}
-        <div style={{ padding: sideOpen ? "14px 12px 12px" : "14px 0 12px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: sideOpen ? "space-between" : "center", flexShrink: 0, gap: 8 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 9, cursor: "pointer", overflow: "hidden" }} onClick={() => !sideOpen && setSideOpen(true)}>
-            <div style={{ width: 34, height: 34, borderRadius: 10, background: "rgba(59,130,246,0.12)", border: "1px solid rgba(59,130,246,0.25)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, overflow: "hidden" }}>
-              <img src="/tenderIQ.png" alt="TenderIQ" style={{ width: 24, height: 24, objectFit: "contain" }} />
+        {/* ── Header: TenderIQ + Partnership ── */}
+        <div style={{ padding: sideOpen ? "14px 12px 12px" : "12px 0 10px", borderBottom: `1px solid ${C.border}`, flexShrink: 0 }}>
+          {sideOpen ? (
+            <>
+              {/* Row 1: Logo + Title + Collapse */}
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+                  <div style={{ width: 34, height: 34, borderRadius: 10, background: "rgba(59,130,246,0.12)", border: "1px solid rgba(59,130,246,0.25)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, overflow: "hidden" }}>
+                    <img src="/tenderIQ.png" alt="TenderIQ" style={{ width: 24, height: 24, objectFit: "contain" }} />
+                  </div>
+                  <span style={{ fontSize: 15, fontWeight: 700, color: C.text1, whiteSpace: "nowrap", letterSpacing: "-0.02em" }}>TenderIQ</span>
+                </div>
+                <button onClick={() => setSideOpen(false)}
+                  style={{ background: "none", border: "none", color: C.text3, cursor: "pointer", padding: 4, borderRadius: 6, display: "flex", flexShrink: 0, transition: "color 0.15s" }}
+                  onMouseEnter={e => e.currentTarget.style.color = C.text1}
+                  onMouseLeave={e => e.currentTarget.style.color = C.text3}>
+                  <ChevronLeftIcon />
+                </button>
+              </div>
+              {/* Row 2: Schüco × Sooru (same section, no border) */}
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <div style={{ background: "white", borderRadius: 4, padding: "2px 5px", display: "flex", alignItems: "center", flexShrink: 0 }}>
+                  <img src="/schueco-logo.png" alt="Schüco" style={{ height: 13, objectFit: "contain" }} />
+                </div>
+                <span style={{ color: C.text3, fontSize: 13, fontWeight: 700, flexShrink: 0 }}>×</span>
+                <div style={{ background: "white", borderRadius: 4, padding: "2px 4px", display: "flex", alignItems: "center", flexShrink: 0 }}>
+                  <img src="/sooru-logo.png" alt="Sooru" style={{ height: 16, objectFit: "contain" }} />
+                </div>
+                <span style={{ color: C.text2, fontSize: 11, fontWeight: 600, whiteSpace: "nowrap" }}>Sooru.AI</span>
+              </div>
+            </>
+          ) : (
+            /* Collapsed: logo + expand button */
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+              <div style={{ width: 34, height: 34, borderRadius: 10, background: "rgba(59,130,246,0.12)", border: "1px solid rgba(59,130,246,0.25)", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
+                <img src="/tenderIQ.png" alt="TenderIQ" style={{ width: 24, height: 24, objectFit: "contain" }} />
+              </div>
+              <button onClick={() => setSideOpen(true)} title="Expand"
+                style={{ background: "none", border: `1px solid ${C.border}`, borderRadius: 6, color: C.text3, cursor: "pointer", padding: "2px 10px", display: "flex", alignItems: "center", justifyContent: "center", transition: "all 0.15s" }}
+                onMouseEnter={e => { e.currentTarget.style.color = C.text1; e.currentTarget.style.borderColor = C.text2; }}
+                onMouseLeave={e => { e.currentTarget.style.color = C.text3; e.currentTarget.style.borderColor = C.border; }}>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+              </button>
             </div>
-            {sideOpen && <span style={{ fontSize: 15, fontWeight: 700, color: C.text1, whiteSpace: "nowrap", letterSpacing: "-0.02em" }}>TenderIQ</span>}
-          </div>
-          {sideOpen && (
-            <button onClick={() => setSideOpen(false)}
-              style={{ background: "none", border: "none", color: C.text3, cursor: "pointer", padding: 4, borderRadius: 6, display: "flex", flexShrink: 0, transition: "color 0.15s" }}
-              onMouseEnter={e => e.currentTarget.style.color = C.text1}
-              onMouseLeave={e => e.currentTarget.style.color = C.text3}>
-              <ChevronLeftIcon />
-            </button>
           )}
         </div>
-
-        {/* ── Partnership: Schüco × Sooru ── */}
-        {sideOpen ? (
-          <div style={{ padding: "9px 14px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", gap: 7, flexShrink: 0 }}>
-            <img src="/schueco-logo.png" alt="Schüco" style={{ height: 13, objectFit: "contain", filter: "brightness(0) invert(1)", opacity: 0.8 }} />
-            <span style={{ color: C.text3, fontSize: 12, fontWeight: 700, flexShrink: 0, lineHeight: 1 }}>×</span>
-            <img src="/sooru-logo.png" alt="Sooru" style={{ height: 17, objectFit: "contain", filter: "brightness(0) invert(1)", opacity: 0.8 }} />
-            <span style={{ color: C.text2, fontSize: 11, fontWeight: 600, whiteSpace: "nowrap" }}>Sooru.AI</span>
-          </div>
-        ) : (
-          <div style={{ padding: "8px 0", borderBottom: `1px solid ${C.border}`, display: "flex", justifyContent: "center", flexShrink: 0 }}>
-            <img src="/sooru-logo.png" alt="Sooru" style={{ height: 16, objectFit: "contain", filter: "brightness(0) invert(1)", opacity: 0.5 }} />
-          </div>
-        )}
 
         {/* ── New Analysis ── */}
         <div style={{ padding: sideOpen ? "10px 10px 6px" : "10px 0 6px", display: "flex", justifyContent: "center", flexShrink: 0 }}>
@@ -296,7 +320,14 @@ export default function TenderIQ() {
                     style={{ width: "100%", padding: "8px 30px 8px 10px", background: currentProjectId === chat.id ? C.bg2 : "transparent", border: "none", borderRadius: 7, color: currentProjectId === chat.id ? C.text1 : C.text2, cursor: "pointer", textAlign: "left", fontFamily: F.sans, fontSize: 13, display: "flex", alignItems: "center", gap: 8, transition: "all 0.1s" }}
                     onMouseEnter={e => { if (currentProjectId !== chat.id) { e.currentTarget.style.background = C.bg2; e.currentTarget.style.color = C.text1; } }}
                     onMouseLeave={e => { if (currentProjectId !== chat.id) { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = C.text2; } }}>
-                    <ChatIcon />
+                    <div style={{ position: "relative", flexShrink: 0 }}>
+                      <ChatIcon />
+                      {chatCounts[chat.id] > 0 && (
+                        <div style={{ position: "absolute", top: -5, right: -6, minWidth: 14, height: 14, borderRadius: 7, background: C.green, color: "#111", fontSize: 8, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 2px" }}>
+                          {chatCounts[chat.id]}
+                        </div>
+                      )}
+                    </div>
                     <div style={{ flex: 1, overflow: "hidden" }}>
                       <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{chat.title}</div>
                       <div style={{ fontSize: 10, color: C.text3, marginTop: 1 }}>{chat.date}</div>
@@ -312,15 +343,25 @@ export default function TenderIQ() {
               ))}
             </>
           ) : (
-            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", paddingTop: 4 }}>
-              <div style={{ position: "relative" }}>
-                {iconBtn(() => setSideOpen(true), "Conversations", <ChatIcon />)}
-                {chats.length > 0 && (
-                  <div style={{ position: "absolute", top: 5, right: 5, minWidth: 16, height: 16, borderRadius: 8, background: C.green, color: "#111", fontSize: 9, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 3px", pointerEvents: "none" }}>
-                    {chats.length > 9 ? "9+" : chats.length}
-                  </div>
-                )}
-              </div>
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, paddingTop: 4 }}>
+              {chats.length === 0 && (
+                <div style={{ color: C.text3, fontSize: 10, textAlign: "center", padding: "8px 0" }}>—</div>
+              )}
+              {chats.map(chat => (
+                <div key={chat.id} style={{ position: "relative" }}>
+                  <button onClick={() => openChat(chat)} title={chat.title}
+                    style={{ width: 40, height: 40, borderRadius: 10, background: currentProjectId === chat.id ? C.bg2 : "transparent", border: currentProjectId === chat.id ? `1px solid ${C.border}` : "none", color: currentProjectId === chat.id ? C.green : C.text3, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", transition: "all 0.15s" }}
+                    onMouseEnter={e => { if (currentProjectId !== chat.id) { e.currentTarget.style.background = C.bg2; e.currentTarget.style.color = C.text2; } }}
+                    onMouseLeave={e => { if (currentProjectId !== chat.id) { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = C.text3; } }}>
+                    <ChatIcon />
+                  </button>
+                  {chatCounts[chat.id] > 0 && (
+                    <div style={{ position: "absolute", top: 4, right: 4, minWidth: 15, height: 15, borderRadius: 8, background: C.green, color: "#111", fontSize: 8, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 2px", pointerEvents: "none" }}>
+                      {chatCounts[chat.id] > 9 ? "9+" : chatCounts[chat.id]}
+                    </div>
+                  )}
+                </div>
+              ))}
             </div>
           )}
         </div>
@@ -348,12 +389,11 @@ export default function TenderIQ() {
         {/* Topbar */}
         <div style={{ height: 50, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 16px", borderBottom: `1px solid ${C.border}`, flexShrink: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <button onClick={() => setSideOpen(!sideOpen)} style={{ background: "none", border: "none", color: C.text2, cursor: "pointer", padding: 4 }}><MenuIcon /></button>
             <span style={{ fontSize: 14, fontWeight: 500, color: C.text1 }}>{currentProjectName || (hasContent ? "Analysis" : "New Analysis")}</span>
           </div>
-          {showResults && (
+          {currentProjectId && (
             <button onClick={() => isMob ? setMobResults(true) : setShowResults(true)}
-              style={{ padding: "5px 12px", background: C.greenSubtle, border: `1px solid ${C.greenBorder}`, borderRadius: 6, color: C.green, cursor: "pointer", fontSize: 12, fontFamily: F.sans, fontWeight: 600, display: "flex", alignItems: "center", gap: 5 }}>
+              style={{ padding: "5px 12px", background: showResults ? C.green : C.greenSubtle, border: `1px solid ${C.greenBorder}`, borderRadius: 6, color: showResults ? "#111" : C.green, cursor: "pointer", fontSize: 12, fontFamily: F.sans, fontWeight: 600, display: "flex", alignItems: "center", gap: 5, transition: "all 0.15s" }}>
               <PanelIcon /> Results
             </button>
           )}
