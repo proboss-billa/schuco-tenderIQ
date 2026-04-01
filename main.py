@@ -34,16 +34,24 @@ from google.genai import types
 
 app = FastAPI(title="Tender Analysis POC API", debug=True)
 
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
 # ── Database ──────────────────────────────────────────────────────────────────
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://poc_user:poc_password@localhost:5432/tender_poc")
+# Railway provides postgres:// but SQLAlchemy requires postgresql://
+DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine)
 
