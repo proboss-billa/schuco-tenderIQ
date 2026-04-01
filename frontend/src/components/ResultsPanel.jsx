@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { C, F } from "@/lib/design";
 import { api } from "@/lib/api";
 import { CloseIcon, DownloadIcon } from "@/components/Icons";
@@ -65,6 +65,14 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
   const [error, setError] = useState("");
   const [expandedIdx, setExpandedIdx] = useState(null);
   const [popup, setPopup] = useState(null);
+  const [showExportMenu, setShowExportMenu] = useState(false);
+  const exportRef = useRef(null);
+
+  useEffect(() => {
+    const handler = (e) => { if (exportRef.current && !exportRef.current.contains(e.target)) setShowExportMenu(false); };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
 
   useEffect(() => {
     if (!projectId) return;
@@ -79,20 +87,117 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
   const found = params.filter(p => p.available);
   const missing = params.filter(p => !p.available);
 
+  const tableRows = () => params.map(p => [
+    p.label,
+    p.available ? p.value : "Not Available",
+    p.unit,
+    p.available ? `${p.confidence}%` : "-",
+    p.available && p.page ? `Pg. ${p.page}` : "-",
+    p.available ? "Found" : "Not Available",
+  ]);
+  const tableHead = ["Parameter", "Value", "Unit", "Confidence", "Page", "Status"];
+
   const exportCSV = () => {
-    const rows = [["Parameter", "Value", "Unit", "Confidence", "Status"]];
-    params.forEach(p => rows.push([
-      p.label,
-      p.available ? p.value : "Not Available",
-      p.unit,
-      p.available ? `${p.confidence}%` : "-",
-      p.available ? "Found" : "Not Available",
-    ]));
+    const rows = [tableHead, ...tableRows()];
     const csv = rows.map(r => r.map(v => `"${v}"`).join(",")).join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href = url; a.download = `tender_${projectId}.csv`; a.click();
-    URL.revokeObjectURL(url);
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+    a.download = `TenderIQ_${projectId}.csv`; a.click();
+  };
+
+  const exportXLS = async () => {
+    const XLSX = await import("xlsx");
+    const ws = XLSX.utils.aoa_to_sheet([tableHead, ...tableRows()]);
+    ws["!cols"] = [{ wch: 30 }, { wch: 40 }, { wch: 18 }, { wch: 12 }, { wch: 8 }, { wch: 14 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Parameters");
+    XLSX.writeFile(wb, `TenderIQ_${projectId}.xlsx`);
+  };
+
+  const exportPDF = async () => {
+    const { default: jsPDF } = await import("jspdf");
+    const { default: autoTable } = await import("jspdf-autotable");
+
+    const loadImg = (src) => new Promise(res => {
+      const img = new Image(); img.crossOrigin = "anonymous";
+      img.onload = () => {
+        const c = document.createElement("canvas");
+        c.width = img.width; c.height = img.height;
+        c.getContext("2d").drawImage(img, 0, 0);
+        res(c.toDataURL("image/png"));
+      };
+      img.src = src;
+    });
+
+    const [schuecoData, sooruData] = await Promise.all([
+      loadImg("/schueco-logo.png"),
+      loadImg("/sooru-logo.png"),
+    ]);
+
+    const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+    const W = doc.internal.pageSize.getWidth();
+
+    // ── Dark header band ──
+    doc.setFillColor(10, 14, 20);
+    doc.rect(0, 0, W, 38, "F");
+
+    // TenderIQ title
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(22);
+    doc.setTextColor(255, 255, 255);
+    doc.text("TenderIQ", 14, 16);
+
+    // Schüco logo (white bg pill)
+    doc.setFillColor(255, 255, 255);
+    doc.roundedRect(14, 20, 34, 10, 2, 2, "F");
+    doc.addImage(schuecoData, "PNG", 15, 21, 32, 8);
+
+    // × separator
+    doc.setFontSize(13); doc.setTextColor(120, 120, 120);
+    doc.text("×", 51, 28);
+
+    // Sooru logo (white bg pill)
+    doc.setFillColor(255, 255, 255);
+    doc.roundedRect(56, 20, 10, 10, 2, 2, "F");
+    doc.addImage(sooruData, "PNG", 57, 21, 8, 8);
+
+    // Sooru.AI text
+    doc.setFontSize(10); doc.setTextColor(200, 200, 200);
+    doc.text("Sooru.AI", 69, 28);
+
+    // Project name subheading
+    doc.setFontSize(10); doc.setFont("helvetica", "normal"); doc.setTextColor(160, 160, 160);
+    doc.text(projectName || "Analysis Results", 14, 46);
+
+    // Summary line
+    const foundCount = params.filter(p => p.available).length;
+    doc.setFontSize(9); doc.setTextColor(100, 100, 100);
+    doc.text(`${foundCount} Found  ·  ${params.length - foundCount} Not Available  ·  Generated ${new Date().toLocaleDateString()}`, 14, 52);
+
+    // Parameters table
+    autoTable(doc, {
+      startY: 57,
+      head: [tableHead],
+      body: tableRows(),
+      styles: { fontSize: 8.5, cellPadding: 3, overflow: "linebreak" },
+      headStyles: { fillColor: [10, 14, 20], textColor: [255, 255, 255], fontStyle: "bold", fontSize: 9 },
+      alternateRowStyles: { fillColor: [245, 247, 250] },
+      columnStyles: {
+        0: { fontStyle: "bold", cellWidth: 38 },
+        1: { cellWidth: 55 },
+        2: { cellWidth: 22 },
+        3: { cellWidth: 20 },
+        4: { cellWidth: 14 },
+        5: { cellWidth: 22 },
+      },
+      didParseCell: (data) => {
+        if (data.section === "body" && data.column.index === 5) {
+          data.cell.styles.textColor = data.cell.raw === "Found" ? [34, 197, 94] : [150, 150, 150];
+        }
+      },
+    });
+
+    doc.save(`TenderIQ_${projectId}.pdf`);
   };
 
   return (
@@ -105,9 +210,31 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
           <div style={{ fontSize: 11, color: C.text3, marginTop: 2 }}>{projectName || "Analysis Results"}</div>
         </div>
         <div style={{ display: "flex", gap: 5, alignItems: "center" }}>
-          <button onClick={exportCSV} style={{ padding: "5px 10px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 6, color: C.text2, cursor: "pointer", fontSize: 11, fontFamily: F.sans, display: "flex", alignItems: "center", gap: 4, fontWeight: 500 }}>
-            <DownloadIcon /> CSV
-          </button>
+          {/* Export dropdown */}
+          <div style={{ position: "relative" }} ref={exportRef}>
+            <button onClick={() => setShowExportMenu(v => !v)}
+              style={{ padding: "5px 10px", background: showExportMenu ? C.bg2 : "transparent", border: `1px solid ${C.border}`, borderRadius: 6, color: C.text2, cursor: "pointer", fontSize: 11, fontFamily: F.sans, display: "flex", alignItems: "center", gap: 4, fontWeight: 500, transition: "all 0.15s" }}>
+              <DownloadIcon /> Export ▾
+            </button>
+            {showExportMenu && (
+              <div style={{ position: "absolute", top: "calc(100% + 4px)", right: 0, background: C.bg1, border: `1px solid ${C.border}`, borderRadius: 8, overflow: "hidden", zIndex: 50, minWidth: 110, boxShadow: "0 8px 24px rgba(0,0,0,0.4)" }}>
+                {[
+                  { label: "CSV", fn: exportCSV, ext: ".csv" },
+                  { label: "Excel (XLS)", fn: exportXLS, ext: ".xlsx" },
+                  { label: "PDF", fn: exportPDF, ext: ".pdf" },
+                ].map(opt => (
+                  <button key={opt.label}
+                    onClick={() => { opt.fn(); setShowExportMenu(false); }}
+                    style={{ width: "100%", padding: "9px 14px", background: "none", border: "none", color: C.text2, cursor: "pointer", fontSize: 12, fontFamily: F.sans, textAlign: "left", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, transition: "background 0.1s" }}
+                    onMouseEnter={e => e.currentTarget.style.background = C.bg2}
+                    onMouseLeave={e => e.currentTarget.style.background = "none"}>
+                    {opt.label}
+                    <span style={{ fontSize: 10, color: C.text3 }}>{opt.ext}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
           <button onClick={onClose} style={{ padding: 4, background: "none", border: "none", color: C.text3, cursor: "pointer" }}>
             <CloseIcon />
           </button>
