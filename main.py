@@ -325,6 +325,48 @@ async def process_project(
     }
 
 
+@app.post("/projects/{project_id}/re-extract", status_code=202)
+async def re_extract_parameters(
+    project_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """Re-run just the parameter extraction step on an already-processed project.
+    Skips document parsing/embedding — uses vectors already in Pinecone."""
+    project = db.query(Project).filter(Project.project_id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    async def _run_extraction(pid: uuid.UUID):
+        _pipeline_log.info(f"[RE-EXTRACT] Starting for project {pid}")
+        _db = SessionLocal()
+        try:
+            extractor = ParameterExtractor(
+                pinecone_index=pinecone_index,
+                embedding_client=embedding_client,
+                db_session=_db,
+                session_factory=SessionLocal,
+            )
+            extractions = await extractor.extract_all_parameters_async(
+                str(pid), facade_parameters=FACADE_PARAMETERS
+            )
+            found_count = len([e for e in extractions if e.get("found")])
+            _pipeline_log.info(f"[RE-EXTRACT] Done — {found_count}/{len(extractions)} parameters found")
+        except Exception as e:
+            import traceback as _tb
+            _tb.print_exc()
+            _pipeline_log.error(f"[RE-EXTRACT] FAILED for project {pid}: {e}")
+        finally:
+            _db.close()
+
+    background_tasks.add_task(_run_extraction, project_id)
+    return {
+        "project_id": str(project_id),
+        "status": "re-extracting",
+        "message": "Extraction started. Check /projects/{project_id}/parameters after ~60s.",
+    }
+
+
 @app.get("/projects/{project_id}/parameters")
 async def get_extracted_parameters(project_id: uuid.UUID, db: Session = Depends(get_db)):
     parameters = db.query(ExtractedParameter).filter(
