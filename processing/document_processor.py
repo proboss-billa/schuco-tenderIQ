@@ -521,13 +521,21 @@ class DocumentProcessor:
         ).all()
 
         for doc in documents:
+            doc.processing_status = "processing"
+            self.db.commit()
             try:
                 if doc.file_type in ['pdf_spec', 'docx_spec']:
                     self._process_specification_document(doc)
                 elif doc.file_type == 'excel_boq':
                     self._process_boq_document(doc)
+                doc.processing_status = "completed"
+                self.db.commit()
             except Exception as e:
                 logger.error(f"Failed to process {doc.original_filename}: {e}")
+                doc.processing_status = "failed"
+                doc.processing_error = str(e)[:1000]
+                self.db.commit()
+                # Continue with other documents — don't abort the whole project
 
         self._extract_all_parameters()
 
@@ -536,7 +544,9 @@ class DocumentProcessor:
 
         # Step 1: Parse document into raw blocks
         if document.file_type == 'pdf_spec':
-            parsed_content = self._parse_pdf(document.file_path)
+            parser = PDFParser()
+            parsed_content, page_count = parser.parse_with_page_count(document.file_path)
+            document.page_count = page_count
         else:  # docx_spec
             parsed_content = self._parse_docx(document.file_path)
 

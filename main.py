@@ -1,6 +1,7 @@
 # main.py
 import os
 import traceback
+import aiofiles
 from dotenv import load_dotenv
 
 from config.parameters import FACADE_PARAMETERS
@@ -111,6 +112,20 @@ def on_startup():
             "ALTER TABLE document_chunks ALTER COLUMN pinecone_id DROP NOT NULL"
         ))
         conn.commit()
+        # ── New columns for multi-file / large-file support ───────────────────
+        conn.execute(text(
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS processing_status VARCHAR(20) DEFAULT 'pending'"
+        ))
+        conn.execute(text(
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS processing_error TEXT"
+        ))
+        conn.execute(text(
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS page_count INTEGER"
+        ))
+        conn.execute(text(
+            "ALTER TABLE extracted_parameters ADD COLUMN IF NOT EXISTS all_sources TEXT"
+        ))
+        conn.commit()
 
 # ── Pinecone ──────────────────────────────────────────────────────────────────
 def initialize_pinecone():
@@ -194,8 +209,9 @@ async def create_project(
     for file in files:
         file_type = classify_file_type(file.filename)
         file_path = upload_dir / file.filename
-        with file_path.open("wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        async with aiofiles.open(str(file_path), "wb") as buffer:
+            while chunk := await file.read(1024 * 1024):  # 1 MB chunks
+                await buffer.write(chunk)
 
         document = Document(
             project_id=project.project_id,
@@ -421,7 +437,7 @@ async def get_extracted_parameters(project_id: uuid.UUID, db: Session = Depends(
     import json as _json
     results = []
     for param in parameters:
-        # Parse stored pages JSON; fall back to primary page if missing
+        # Parse legacy pages list
         try:
             pages = _json.loads(param.source_pages) if param.source_pages else []
         except (ValueError, TypeError):
@@ -429,11 +445,29 @@ async def get_extracted_parameters(project_id: uuid.UUID, db: Session = Depends(
         if not pages and param.source_page_number is not None:
             pages = [param.source_page_number]
 
+        # Parse rich multi-document sources list
+        try:
+            all_sources = _json.loads(param.all_sources) if param.all_sources else []
+        except (ValueError, TypeError):
+            all_sources = []
+
+        # Back-fill all_sources from legacy fields if not present
+        if not all_sources and (param.source_document or pages):
+            doc_name = param.source_document.original_filename if param.source_document else None
+            if doc_name or pages:
+                all_sources = [{
+                    "document_id": str(param.source_document_id) if param.source_document_id else None,
+                    "document":    doc_name,
+                    "pages":       pages,
+                    "section":     param.source_section,
+                }]
+
         results.append({
             "parameter_name": param.parameter_display_name,
             "value": param.value_text,
             "unit": param.unit,
             "confidence": float(param.confidence_score),
+            # Primary source (backwards compatible)
             "source": {
                 "document": param.source_document.original_filename if param.source_document else None,
                 "page": param.source_page_number,
@@ -441,14 +475,31 @@ async def get_extracted_parameters(project_id: uuid.UUID, db: Session = Depends(
                 "section": param.source_section,
                 "subsection": param.source_subsection,
             },
+            # Full multi-document source list (new)
+            "sources": all_sources,
             "notes": param.notes,
         })
+
+    from models.document import Document as _Document
+    docs = db.query(_Document).filter(_Document.project_id == project_id).all()
+    documents_info = [
+        {
+            "document_id": str(d.document_id),
+            "filename": d.original_filename,
+            "file_type": d.file_type,
+            "processing_status": getattr(d, 'processing_status', 'completed'),
+            "page_count": getattr(d, 'page_count', None),
+            "num_chunks": d.num_chunks,
+        }
+        for d in docs
+    ]
 
     return {
         "project_id": str(project_id),
         "processing_status": project.processing_status,
         "parameters": results,
         "total_extracted": len(results),
+        "documents": documents_info,
     }
 
 

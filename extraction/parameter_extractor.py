@@ -206,13 +206,28 @@ Include ALL sources in source_numbers that contain relevant information, not jus
                     'chunk_id':      primary['chunk_id'],
                 }
 
-            all_pages = []
+            # Collect per-document sources (document_id → {pages, section})
+            doc_sources: dict = {}
             for i in source_idxs:
                 if 0 <= i < len(chunk_dicts):
-                    pg = chunk_dicts[i]['page_number']
-                    if pg is not None and pg not in all_pages:
-                        all_pages.append(pg)
-            result['all_pages'] = all_pages
+                    c = chunk_dicts[i]
+                    did = c['document_id']
+                    pg  = c['page_number']
+                    if did not in doc_sources:
+                        doc_sources[did] = {
+                            'document_id': did,
+                            'document':    c['document_name'],
+                            'pages':       [],
+                            'section':     c['section_title'],
+                        }
+                    if pg is not None and pg not in doc_sources[did]['pages']:
+                        doc_sources[did]['pages'].append(pg)
+
+            all_sources = list(doc_sources.values())
+            # all_pages for backwards-compat (all pages across all docs)
+            all_pages = [pg for src in all_sources for pg in src['pages']]
+            result['all_pages']   = all_pages
+            result['all_sources'] = all_sources
 
         result['parameter_name'] = param_config['name']
         return result
@@ -396,6 +411,7 @@ Include ALL sources in source_numbers that contain relevant information, not jus
                 existing.confidence_score      = extraction.get('confidence', 0.0)
                 existing.extraction_method     = 'llm_extraction'
                 existing.notes                 = extraction.get('explanation')
+                existing.all_sources = json.dumps(extraction.get('all_sources', []))
             else:
                 record = ExtractedParameter(
                     project_id=project_id,
@@ -413,6 +429,7 @@ Include ALL sources in source_numbers that contain relevant information, not jus
                     confidence_score=extraction.get('confidence', 0.0),
                     extraction_method='llm_extraction',
                     notes=extraction.get('explanation'),
+                    all_sources=json.dumps(extraction.get('all_sources', [])),
                 )
                 self.db.add(record)
 
