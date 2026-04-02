@@ -212,10 +212,14 @@ async def _run_pipeline(project_id: uuid.UUID):
         )
         processor.process_all_documents()
 
+        # Clear stale session cache so the extractor sees chunks committed by worker threads
+        db.expire_all()
+
         extractor = ParameterExtractor(
             pinecone_index=pinecone_index,
             embedding_client=embedding_client,
             db_session=db,
+            session_factory=SessionLocal,
         )
         await extractor.extract_all_parameters_async(
             str(project_id), facade_parameters=FACADE_PARAMETERS

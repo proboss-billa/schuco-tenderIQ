@@ -19,11 +19,13 @@ from typing import Dict, List
 class ParameterExtractor:
     """Extract facade parameters using LLM"""
 
-    def __init__(self, pinecone_index, embedding_client, db_session):
+    def __init__(self, pinecone_index, embedding_client, db_session, session_factory=None):
         self.pinecone = pinecone_index
         self.embedder = embedding_client
         # self.llm = llm_client
         self.db = db_session
+        # session_factory lets each search thread use its own isolated session
+        self.session_factory = session_factory
         self.gemini = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
     @retry(
@@ -129,7 +131,11 @@ Include ALL sources in source_numbers that contain relevant information, not jus
         return extraction_result
 
     def _search_relevant_chunks(self, project_id: str, query: str, top_k: int = 5) -> List[Dict]:
-        """Search Pinecone for relevant chunks"""
+        """Search Pinecone for relevant chunks.
+
+        Uses an isolated DB session when session_factory is provided so this
+        method is safe to call from multiple concurrent threads.
+        """
 
         # Generate query embedding
         query_embedding = self.embedder.embed([query])[0]
@@ -142,26 +148,29 @@ Include ALL sources in source_numbers that contain relevant information, not jus
             include_metadata=True
         )
 
-        # Fetch full chunk details from PostgreSQL
         chunk_ids = [match['id'] for match in results['matches']]
 
-        chunks = self.db.query(DocumentChunk).filter(
-            DocumentChunk.pinecone_id.in_(chunk_ids)
-        ).all()
+        # Use a fresh session per call to avoid shared-session threading issues
+        db = self.session_factory() if self.session_factory else self.db
+        try:
+            from sqlalchemy.orm import joinedload
+            chunks = (
+                db.query(DocumentChunk)
+                .options(joinedload(DocumentChunk.document))  # eager-load to avoid lazy-load in threads
+                .filter(DocumentChunk.pinecone_id.in_(chunk_ids))
+                .all()
+            )
 
-        # Combine with scores
-        chunks_with_scores = []
-        for chunk in chunks:
-            score = next((m['score'] for m in results['matches'] if m['id'] == chunk.pinecone_id), 0)
-            chunks_with_scores.append({
-                'chunk': chunk,
-                'score': score
-            })
+            chunks_with_scores = []
+            for chunk in chunks:
+                score = next((m['score'] for m in results['matches'] if m['id'] == chunk.pinecone_id), 0)
+                chunks_with_scores.append({'chunk': chunk, 'score': score})
 
-        # Sort by score
-        chunks_with_scores.sort(key=lambda x: x['score'], reverse=True)
-
-        return chunks_with_scores
+            chunks_with_scores.sort(key=lambda x: x['score'], reverse=True)
+            return chunks_with_scores
+        finally:
+            if self.session_factory:
+                db.close()
 
 
     # --- Async versions of your two I/O-bound methods ---
