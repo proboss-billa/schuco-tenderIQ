@@ -35,6 +35,12 @@ PARENT_MAX_WORDS  = 3000  # level-0 parent cap: long sections are split here
 EMBED_BATCH_SIZE  = 64    # max texts per embedding API call
 PARAM_BATCH_SIZE  = 1800  # chunks sent per LLM parameter-extraction call
 
+# Streaming processing: number of sections processed per batch.
+# Each section typically contributes 1 parent + a few children.
+# At SECTION_BATCH=50 with ~3 children/section → ~150 child chunks per DB commit.
+# This keeps peak memory per batch small regardless of document size.
+SECTION_BATCH = 50
+
 # Legacy constants kept for reference — no longer used in new pipeline
 CHUNK_SIZE    = 512
 CHUNK_OVERLAP = 64
@@ -146,40 +152,34 @@ class DocumentProcessor:
 
         return blocks
 
-    def _build_hierarchical_chunks(
-            self,
-            parsed_content: List[Dict],
-            document,
-    ) -> tuple[List[Dict], List[Dict]]:
+    # ── Streaming chunking pipeline ───────────────────────────────────────────
+    #
+    # Large documents (300+ pages) previously failed because:
+    #   1. ALL blocks were kept in memory simultaneously.
+    #   2. ALL child chunks were embedded in one pass before any DB writes.
+    #   3. One giant DB transaction held thousands of unsaved rows.
+    #
+    # The new approach splits the work into three clearly-separated phases:
+    #   Phase 1  _group_into_sections()       — lightweight, no UUIDs
+    #   Phase 2  _build_chunks_for_sections() — UUIDs, wiring, one section-batch
+    #   Phase 3  embed + _store_chunks()      — per-batch API calls + DB commit
+    #
+    # _process_specification_document() drives them in a loop of SECTION_BATCH
+    # sections at a time.  At any point, only ONE batch of parents + children +
+    # embeddings is in memory.
+
+    @staticmethod
+    def _group_into_sections(parsed_content: List[Dict]) -> List[Dict]:
         """
-        Build a two-level hierarchy of chunks from parsed document blocks.
+        Phase 1 — Group raw parsed blocks into contiguous section objects.
 
-        ── Level 0  (parent / section) ─────────────────────────────────────────
-        One chunk per contiguous (section, subsection) group.  Contains the
-        FULL concatenated text of that section.  Stored in PostgreSQL only —
-        NOT embedded or indexed in Pinecone.  Acts as the rich-context window
-        passed to the LLM after a child-level vector search hits.
+        Each section dict:
+            {sec_key, section, subsection, page_start, page_end,
+             all_words: List[str], is_table: bool}
 
-        ── Level 1  (child / paragraph) ────────────────────────────────────────
-        ~CHILD_SIZE-word slices within each section, with NO overlap (the
-        parent already provides surrounding context).  These are embedded and
-        indexed in Pinecone for precise retrieval.
-
-        Each child stores:
-          parent_chunk_id → the level-0 chunk for its section
-          prev_chunk_id   → previous sibling in the same section
-          next_chunk_id   → next sibling in the same section
-
-        Very long sections (> PARENT_MAX_WORDS) are split into multiple parent
-        chunks so the LLM context window is never overwhelmed.
-
-        Returns
-        -------
-        (parent_chunks, child_chunks)  –  plain dicts (no SQLAlchemy objects).
-        Each dict contains a pre-assigned ``chunk_id`` UUID so that children
-        can reference parent IDs before any DB write.
+        This is a lightweight pass — no UUIDs, no embedding.  It converts
+        blocks (which include headings) into text-bearing section buckets.
         """
-        # ── Phase 1: group blocks into contiguous sections ───────────────────
         sections: List[Dict] = []
         current: Dict | None = None
 
@@ -190,8 +190,8 @@ class DocumentProcessor:
             sec_key = (block.get("section"), block.get("subsection"))
             if current is None or current["sec_key"] != sec_key:
                 current = {
-                    "sec_key":   sec_key,
-                    "section":   block.get("section"),
+                    "sec_key":    sec_key,
+                    "section":    block.get("section"),
                     "subsection": block.get("subsection"),
                     "page_start": block.get("page"),
                     "page_end":   block.get("page"),
@@ -206,18 +206,39 @@ class DocumentProcessor:
             if block["type"] != "table":
                 current["is_table"] = False   # mixed → not a pure table section
 
-        # ── Phase 2: produce parent + child chunks ───────────────────────────
+        return sections
+
+    def _build_chunks_for_sections(
+            self,
+            sections: List[Dict],
+            document,
+            chunk_idx_start: int = 0,
+    ) -> tuple[List[Dict], List[Dict], int]:
+        """
+        Phase 2 — Build parent + child chunk dicts for a batch of sections.
+
+        Returns (parents, children, next_chunk_idx).
+
+        ── Level 0  (parent / section) ─────────────────────────────────────────
+        One parent per contiguous (section, subsection) group (or per
+        PARENT_MAX_WORDS window if the section is very long).  Stored in
+        PostgreSQL ONLY — not embedded or indexed in Pinecone.  Acts as the
+        rich context window given to the LLM.
+
+        ── Level 1  (child / paragraph) ────────────────────────────────────────
+        ~CHILD_SIZE-word slices within each parent window, embedded and
+        indexed in Pinecone for precise retrieval.  Each child stores
+        parent_chunk_id, prev_chunk_id, next_chunk_id.
+        """
         parents:  List[Dict] = []
         children: List[Dict] = []
-        chunk_idx = 0   # shared sequential counter preserves document order
+        chunk_idx = chunk_idx_start
 
         for sec in sections:
             all_words = sec["all_words"]
             if not all_words:
                 continue
 
-            # Split very long sections into ≤PARENT_MAX_WORDS parent windows
-            # so no single LLM context is gigantic.
             for p_start in range(0, len(all_words), PARENT_MAX_WORDS):
                 parent_words = all_words[p_start : p_start + PARENT_MAX_WORDS]
                 parent_id    = uuid.uuid4()
@@ -240,7 +261,6 @@ class DocumentProcessor:
                 })
                 chunk_idx += 1
 
-                # Slice parent into CHILD_SIZE children
                 section_children: List[Dict] = []
                 for c_start in range(0, len(parent_words), CHILD_SIZE):
                     child_words = parent_words[c_start : c_start + CHILD_SIZE]
@@ -259,7 +279,7 @@ class DocumentProcessor:
                         "subsection":      sec["subsection"],
                         "is_table":        False,
                         "parent_chunk_id": parent_id,
-                        "prev_chunk_id":   None,   # wired below
+                        "prev_chunk_id":   None,
                         "next_chunk_id":   None,
                     })
                     chunk_idx += 1
@@ -272,11 +292,7 @@ class DocumentProcessor:
 
                 children.extend(section_children)
 
-        logger.info(
-            f"[CHUNK] doc={document.original_filename}: "
-            f"{len(parents)} section-parents, {len(children)} child chunks"
-        )
-        return parents, children
+        return parents, children, chunk_idx
 
     def _generate_embeddings(self, texts: List[str]) -> List[List[float]]:
         """
@@ -540,9 +556,26 @@ class DocumentProcessor:
         self._extract_all_parameters()
 
     def _process_specification_document(self, document):
-        """Process PDF/DOCX specification using hierarchical chunking."""
+        """
+        Process a PDF/DOCX specification using the streaming hierarchical pipeline.
 
-        # Step 1: Parse document into raw blocks
+        Memory model
+        ────────────
+        The pipeline processes SECTION_BATCH sections at a time so that only
+        one small batch of parents + children + embeddings is ever in memory
+        simultaneously.  This allows arbitrarily large documents (400+ pages)
+        to be processed without hitting memory limits.
+
+        Pipeline per batch
+        ──────────────────
+        1. _group_into_sections()         — parse blocks into section objects
+        2. _build_chunks_for_sections()   — assign UUIDs, wire prev/next links
+        3. _generate_embeddings()         — embed child texts (64 per API call)
+        4. _store_chunks()                — INSERT to PostgreSQL + Pinecone, commit
+        5. del parents/children/embeddings — release batch memory
+        """
+
+        # ── Step 1: Parse ─────────────────────────────────────────────────────
         if document.file_type == 'pdf_spec':
             parser = PDFParser()
             parsed_content, page_count = parser.parse_with_page_count(document.file_path)
@@ -550,19 +583,53 @@ class DocumentProcessor:
         else:  # docx_spec
             parsed_content = self._parse_docx(document.file_path)
 
-        # Step 2: Build section-parent + paragraph-child chunk hierarchy
-        parents, children = self._build_hierarchical_chunks(parsed_content, document)
+        # ── Step 2: Group into sections (lightweight — no UUIDs) ──────────────
+        sections = self._group_into_sections(parsed_content)
+        del parsed_content   # free raw block memory — no longer needed
 
-        # Step 3: Embed only child chunks (parents are context, not queries)
-        child_embeddings = self._generate_embeddings([c['text'] for c in children])
+        total_sections = len(sections)
+        total_batches  = max(1, (total_sections + SECTION_BATCH - 1) // SECTION_BATCH)
+        logger.info(
+            f"[CHUNK] {document.original_filename}: {total_sections} sections "
+            f"→ {total_batches} streaming batch(es) of up to {SECTION_BATCH}"
+        )
 
-        # Step 4: Store parents (DB only) + children (DB + Pinecone)
-        self._store_chunks(parents, children, child_embeddings, document)
+        # ── Steps 3–6: Stream — build UUIDs → embed → store → free ───────────
+        chunk_idx      = 0
+        total_children = 0
 
-        # Mark as processed — report searchable child count
-        document.processed = True
-        document.num_chunks = len(children)
+        for batch_num, batch_start in enumerate(range(0, total_sections, SECTION_BATCH), 1):
+            batch = sections[batch_start : batch_start + SECTION_BATCH]
+
+            parents, children, chunk_idx = self._build_chunks_for_sections(
+                batch, document, chunk_idx_start=chunk_idx
+            )
+            if not children:
+                continue
+
+            child_embeddings = self._generate_embeddings([c["text"] for c in children])
+            self._store_chunks(parents, children, child_embeddings, document)
+            total_children += len(children)
+
+            logger.info(
+                f"[CHUNK] {document.original_filename} batch {batch_num}/{total_batches}: "
+                f"stored {len(children)} child chunks "
+                f"(running total: {total_children})"
+            )
+
+            # Explicitly release this batch to keep peak memory small
+            del parents, children, child_embeddings
+
+        del sections
+
+        # ── Mark as processed ─────────────────────────────────────────────────
+        document.processed  = True
+        document.num_chunks = total_children
         self.db.commit()
+        logger.info(
+            f"[CHUNK] {document.original_filename}: done — "
+            f"{total_children} searchable child chunks"
+        )
 
     def _process_boq_document(self, document):
         """Process Excel BOQ — store items in PostgreSQL and embed into Pinecone."""
