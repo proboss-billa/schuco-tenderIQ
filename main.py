@@ -31,7 +31,8 @@ from models.user import User
 from processing.document_processor import DocumentProcessor
 from google_embedding import GoogleEmbedding
 
-import anthropic
+from google import genai
+from google.genai import types
 
 app = FastAPI(title="Tender Analysis POC API", debug=True)
 
@@ -112,7 +113,7 @@ def initialize_pinecone():
 # ── Shared service clients (stateless, safe to share) ────────────────────────
 pinecone_index = initialize_pinecone()
 embedding_client = GoogleEmbedding()
-claude_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def classify_file_type(filename: str) -> str:
@@ -297,15 +298,17 @@ async def adhoc_query(project_id: uuid.UUID, query: str = Form(...), db: Session
 - Always cite the page number (e.g. "Page 12") and document name where the information was found.
 - If the answer isn't present, say "Information not found in documents"."""
 
-    response = claude_client.messages.create(
-        model="claude-opus-4-6",
-        max_tokens=500,
-        temperature=0.1,
-        system=system_prompt,
-        messages=[{"role": "user", "content": f"Question: {query}\n\nContext:\n{context}"}],
+    response = gemini_client.models.generate_content(
+        model="gemini-3.1-flash-preview",
+        contents=f"Question: {query}\n\nContext:\n{context}",
+        config=types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            max_output_tokens=500,
+            temperature=0.1,
+        ),
     )
 
-    answer = response.content[0].text
+    answer = response.text
 
     query_log = QueryLog(
         project_id=project_id,

@@ -7,7 +7,8 @@ from typing import List, Dict, Any
 import uuid
 from pathlib import Path
 
-import anthropic
+from google import genai
+from google.genai import types
 import os
 
 from models.boq_item import BOQItem
@@ -42,7 +43,7 @@ class DocumentProcessor:
         self.pinecone = pinecone_index
         self.embedder = embedding_client
         # self.llm = llm_client
-        self.claude_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        self.gemini_llm_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 
 
@@ -426,14 +427,16 @@ class DocumentProcessor:
         {context}
         """
 
-        response = self.claude_client.messages.create(
-            model="claude-opus-4-6",
-            max_tokens=4096,
-            temperature=0.1,
-            system=system_instr,
-            messages=[{"role": "user", "content": prompt}],
+        response = self.gemini_llm_client.models.generate_content(
+            model="gemini-3.1-flash-preview",
+            config=types.GenerateContentConfig(
+                system_instruction=system_instr,
+                response_mime_type="application/json",
+                temperature=0.1,
+            ),
+            contents=prompt
         )
-        raw_response = response.content[0].text
+        raw_response = response.text
 
         # ── parse & persist ───────────────────────────────────────────────────
         try:

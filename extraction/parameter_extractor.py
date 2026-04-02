@@ -6,7 +6,9 @@ from models.document_chunk import DocumentChunk
 from models.extracted_parameter import ExtractedParameter
 
 import os
-import anthropic
+from google import genai
+from google.genai import types
+from google.genai.errors import ClientError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from processing.document_processor import logger
@@ -22,12 +24,12 @@ class ParameterExtractor:
         self.embedder = embedding_client
         # self.llm = llm_client
         self.db = db_session
-        self.claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        self.gemini = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
     @retry(
         stop=stop_after_attempt(5),
         wait=wait_exponential(multiplier=1, min=8, max=60),
-        retry=retry_if_exception_type(anthropic.RateLimitError)
+        retry=retry_if_exception_type(ClientError)
     )
     def extract_facade_parameter(self, param_config, context):
         # System instructions keep the "Analyst" persona consistent
@@ -59,19 +61,22 @@ Set "found" to true only if the parameter is clearly present in the context.
 """
         logger.info(prompt)
         try:
-            response = self.claude.messages.create(
-                model="claude-opus-4-6",
-                max_tokens=1024,
-                temperature=0.1,
-                system=system_instr,
-                messages=[{"role": "user", "content": prompt}],
+            response = self.gemini.models.generate_content(
+                model="gemini-3.1-flash-preview",
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instr,
+                    response_mime_type="application/json",
+                    temperature=0.1,
+                ),
+                contents=prompt
             )
-            result_text = response.content[0].text
-            logger.info(result_text)
-            return result_text
+            logger.info(response.text)
+            return response.text
 
-        except anthropic.RateLimitError as e:
-            logger.info(f"Rate limit hit for {param_config['display_name']}. Retrying...")
+        except ClientError as e:
+            if e.status_code == 429:
+                logger.info(f"Rate limit hit for {param_config['display_name']}. Retrying...")
+                raise e
             raise e
 
     def extract_all_parameters(self, project_id: str) -> List[Dict]:
