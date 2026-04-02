@@ -35,29 +35,42 @@ class ParameterExtractor:
         # System instructions keep the "Analyst" persona consistent
         system_instr = "You are an expert extracting technical parameters from facade/curtain wall specifications."
 
+        value_type = param_config.get('value_type', 'text')
+        value_guidance = (
+            "For numeric parameters: set value to the number as a string and value_numeric to the number. "
+            "For text/composite parameters (e.g. seismic zone, performance class, multi-part values): "
+            "set value to a concise summary of ALL relevant sub-values found (e.g. 'Zone IV, Z=0.24, I=1.2, R=5'), "
+            "and set value_numeric to null. "
+            "Do NOT require an exact unit match — if the information is present, extract it."
+        )
+
         prompt = f"""
 Extract the following parameter from the document context below.
 
 **Parameter:** {param_config['display_name']}
 **Description:** {param_config['description']}
-**Expected Units:** {', '.join(param_config['expected_units'])}
+**Expected Units / Format:** {', '.join(param_config['expected_units'])} (use best match or describe if composite)
+**Value Type:** {value_type}
 
 **Document Context:**
 {context}
 
 **Instructions:**
+{value_guidance}
+
 Return a JSON object with EXACTLY these fields:
 {{
   "found": true or false,
-  "value": "extracted value as string, or null if not found",
-  "value_numeric": numeric value as a number or null,
+  "value": "extracted value as string (summarise all relevant sub-values), or null if not found",
+  "value_numeric": numeric value as a number or null (null for composite/text values),
   "unit": "unit string or null",
   "source_number": 1, 2, or 3 (which source contained the value),
   "confidence": float between 0.0 and 1.0,
   "explanation": "brief explanation of where/how you found it"
 }}
 
-Set "found" to true only if the parameter is clearly present in the context.
+Set "found" to true if ANY relevant information for this parameter is present in the context, even if partial.
+Set "found" to false only if the parameter is completely absent from the context.
 """
         logger.info(prompt)
         try:

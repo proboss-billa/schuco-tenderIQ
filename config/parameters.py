@@ -31,10 +31,10 @@ FACADE_PARAMETERS = [
     {
         'name': 'seismic',
         'display_name': 'Seismic Performance',
-        'description': 'Seismic design requirements and inter-storey drift capacity for facade',
-        'expected_units': ['mm', '%', 'g', 'mm/m'],
+        'description': 'Seismic design parameters including seismic zone, zone factor (Z), importance factor (I), response reduction factor (R), inter-storey drift, and ground acceleration for the facade or structure',
+        'expected_units': ['mm', '%', 'g', 'mm/m', 'zone', 'dimensionless'],
         'value_type': 'text',
-        'search_keywords': ['seismic', 'earthquake', 'inter-storey drift', 'interstory drift', 'seismic zone', 'seismic load', 'ground acceleration', 'PGA'],
+        'search_keywords': ['seismic', 'earthquake', 'seismic zone', 'zone factor', 'importance factor', 'response reduction', 'inter-storey drift', 'interstory drift', 'seismic load', 'ground acceleration', 'PGA', 'IS 1893', 'seismic coefficient'],
         'extraction_strategy': 'llm_with_context'
     },
     {
