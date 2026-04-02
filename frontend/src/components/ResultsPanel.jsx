@@ -6,19 +6,33 @@ import { CloseIcon, DownloadIcon } from "@/components/Icons";
 
 // ── Full list of required parameters (always shown) ──────────────────────────
 const REQUIRED_PARAMS = [
-  { key: "Wind Load",                  label: "Wind Load",                  unit: "kN/m² / Pa" },
-  { key: "Water Tightness",            label: "Water Tightness",            unit: "Pa / Class" },
-  { key: "Air Permeability",           label: "Air Permeability",           unit: "m³/h·m² / Class" },
-  { key: "Seismic Performance",        label: "Seismic Performance",        unit: "mm / g" },
-  { key: "Acoustic Rating",            label: "Acoustic Rating",            unit: "dB / Rw" },
-  { key: "U-Value",                    label: "U-Value",                    unit: "W/m²K" },
-  { key: "Glass Thickness (Openable)", label: "Glass Thickness (Openable)", unit: "mm" },
-  { key: "BMU Load",                   label: "BMU Load",                   unit: "kN / kg" },
-  { key: "No. of Barriers",            label: "No. of Barriers",            unit: "nos" },
-  { key: "Stack Height",               label: "Stack Height",               unit: "mm / m" },
-  { key: "Vertical Stack Movement",    label: "Vertical Stack Movement",    unit: "mm" },
-  { key: "Signage Load",               label: "Signage Load",               unit: "kN / kg" },
-  { key: "Horizontal Movement",        label: "Horizontal Movement",        unit: "mm" },
+  { key: "Wind Load",                             label: "Wind Load",                             unit: "kN/m² / Pa" },
+  { key: "Water Tightness",                       label: "Water Tightness",                       unit: "Pa / Class" },
+  { key: "Air Permeability",                      label: "Air Permeability",                      unit: "m³/h·m² / Class" },
+  { key: "Seismic Performance",                   label: "Seismic Performance",                   unit: "mm / g" },
+  { key: "Acoustic Rating",                       label: "Acoustic Rating",                       unit: "dB / Rw" },
+  { key: "U-Value",                               label: "U-Value",                               unit: "W/m²K" },
+  { key: "Glass Thickness (Openable)",            label: "Glass Thickness (Openable)",            unit: "mm" },
+  { key: "Glass Thickness (Fixed)",               label: "Glass Thickness (Fixed)",               unit: "mm" },
+  { key: "BMU Load",                              label: "BMU Load",                              unit: "kN / kg" },
+  { key: "No. of Barriers",                       label: "No. of Barriers",                       unit: "nos" },
+  { key: "Stack Height",                          label: "Stack Height",                          unit: "mm / m" },
+  { key: "Vertical Stack Movement",               label: "Vertical Stack Movement",               unit: "mm" },
+  { key: "Horizontal Movement",                   label: "Horizontal Movement",                   unit: "mm" },
+  { key: "Deflection Limit",                      label: "Deflection Limit",                      unit: "L/xxx / mm" },
+  { key: "Fire Rating",                           label: "Fire Rating",                           unit: "min / Class" },
+  { key: "Solar Factor / g-Value / SHGC",         label: "Solar Factor / g-Value / SHGC",         unit: "dimensionless / %" },
+  { key: "Visible Light Transmittance (VLT)",     label: "Visible Light Transmittance (VLT)",     unit: "%" },
+  { key: "Impact Resistance",                     label: "Impact Resistance",                     unit: "J / Class" },
+  { key: "Facade System Type",                    label: "Facade System Type",                    unit: "type" },
+  { key: "Warranty Period",                       label: "Warranty Period",                       unit: "years" },
+  { key: "Testing & Mock-up Requirements",        label: "Testing & Mock-up Requirements",        unit: "standard" },
+  { key: "Slab Edge Deflection",                  label: "Slab Edge Deflection",                  unit: "mm" },
+  { key: "Thermal Movement",                      label: "Thermal Movement",                      unit: "mm / °C" },
+  { key: "Facade Dead Load / Self Weight",        label: "Facade Dead Load / Self Weight",        unit: "kN/m²" },
+  { key: "Sustainability / Green Rating",         label: "Sustainability / Green Rating",         unit: "rating" },
+  { key: "Signage Load",                          label: "Signage Load",                          unit: "kN / kg" },
+  { key: "Blast / Explosion Resistance",          label: "Blast / Explosion Resistance",          unit: "kPa / Class" },
 ];
 
 function confidenceColor(c) {
@@ -32,7 +46,11 @@ function mergeWithRequired(extracted) {
     map[name] = item;
   });
 
-  return REQUIRED_PARAMS.map(req => {
+  // Keys already covered by the fixed required list
+  const requiredKeys = new Set(REQUIRED_PARAMS.map(r => r.key));
+
+  // Build the required rows first (always shown, found or not)
+  const requiredRows = REQUIRED_PARAMS.map(req => {
     const found = map[req.key];
     if (found) {
       const rawConf = found.confidence ?? found.score ?? 0;
@@ -58,6 +76,33 @@ function mergeWithRequired(extracted) {
       available: false,
     };
   });
+
+  // Append any extra parameters returned by the backend not in the required list
+  const extraRows = (extracted || [])
+    .filter(item => {
+      const name = item.parameter_name || item.parameter || item.name || "";
+      const isFound = item.found !== false && (item.value ?? item.value_text);
+      return isFound && !requiredKeys.has(name);
+    })
+    .map(item => {
+      const name = item.parameter_name || item.parameter || item.name || "";
+      const rawConf = item.confidence ?? item.score ?? 0;
+      const conf = Math.round(rawConf * (rawConf > 1 ? 1 : 100));
+      return {
+        label: item.display_name || name,
+        unit: item.unit || item.expected_unit || "",
+        value: item.value ?? item.value_text ?? "-",
+        confidence: conf,
+        notes: item.notes || null,
+        page: item.source?.page ?? null,
+        pages: item.source?.pages?.length ? item.source.pages : (item.source?.page ? [item.source.page] : []),
+        section: item.source?.section ?? null,
+        available: true,
+        extra: true,
+      };
+    });
+
+  return [...requiredRows, ...extraRows];
 }
 
 export default function ResultsPanel({ token, projectId, projectName, onClose, isMobile }) {
@@ -360,8 +405,19 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
 
         {!loading && !polling && params.map((r, i) => {
           const isExpanded = expandedIdx === i;
+          const showExtraDivider = r.extra && (i === 0 || !params[i - 1].extra);
           return (
-            <div key={i}
+            <div key={i}>
+            {showExtraDivider && (
+              <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "10px 0 8px" }}>
+                <div style={{ flex: 1, height: 1, background: C.border }} />
+                <span style={{ fontSize: 10, color: C.text3, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", whiteSpace: "nowrap" }}>
+                  Additional Parameters
+                </span>
+                <div style={{ flex: 1, height: 1, background: C.border }} />
+              </div>
+            )}
+            <div
               onClick={() => r.available && setExpandedIdx(isExpanded ? null : i)}
               onDoubleClick={() => r.available && setPopup(r)}
               style={{ padding: "12px 14px", background: r.available ? C.bg1 : "transparent", borderRadius: 8, marginBottom: 6, border: `1px solid ${isExpanded ? C.greenBorder : C.border}`, opacity: r.available ? 1 : 0.5, transition: "border-color 0.15s", cursor: r.available ? "pointer" : "default" }}
@@ -414,13 +470,14 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
                 )}
               </div>
             </div>
+            </div>
           );
         })}
       </div>
 
       {/* Footer */}
       <div style={{ padding: "12px 18px", borderTop: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0 }}>
-        <div style={{ fontSize: 11, color: C.text3 }}>{REQUIRED_PARAMS.length} parameters tracked</div>
+        <div style={{ fontSize: 11, color: C.text3 }}>{params.length} parameters tracked</div>
         {found.length > 0 && (
           <div style={{ fontSize: 11, color: C.ok, fontWeight: 500, display: "flex", alignItems: "center", gap: 4 }}>
             <div style={{ width: 6, height: 6, borderRadius: "50%", background: C.ok }} />
