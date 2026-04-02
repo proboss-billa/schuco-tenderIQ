@@ -1,0 +1,395 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  FACADE EXTRACTOR — Parameter Catalog
+#  Runtime-configurable. Add / remove / edit entries freely.
+#  No project names, no spec values, no layer names are hardcoded here.
+#
+#  extraction_type  : LINEAR | COMPOUND | SPACING | COUNT | ANGULAR | ANNOTATION
+#  dimension_direction: HORIZONTAL | VERTICAL | ANY
+#  relevant_sheet_types: list of PLAN | ELEVATION | SECTION | DETAIL | SCHEDULE
+#  relevant_layer_groups: list of groups defined in layer_keywords.yaml
+#  spec_value       : null  (leave null unless you want cross-check)
+#  spec_tolerance   : null or ± value in same unit
+#  confidence_threshold: minimum score to include in output (0.0 – 1.0)
+# ─────────────────────────────────────────────────────────────────────────────
+
+parameters:
+
+  # ── 1. Panel / Module Dimensions ───────────────────────────────────────────
+
+  - id: 1
+    name: "Panel Width"
+    aliases:
+      - "bay width"
+      - "panel modulation"
+      - "grid width"
+      - "module width"
+      - "panel w"
+      - "cw width"
+      - "unitized width"
+      - "facade module"
+    extraction_type: LINEAR
+    unit: mm
+    dimension_direction: HORIZONTAL
+    relevant_sheet_types: [PLAN, ELEVATION, DETAIL]
+    relevant_layer_groups: [structural_frame, annotation]
+    spec_value: null
+    spec_tolerance: null
+    confidence_threshold: 0.50
+
+  - id: 2
+    name: "Panel Height"
+    aliases:
+      - "floor height"
+      - "storey height"
+      - "floor to floor"
+      - "f-f"
+      - "panel h"
+      - "panel ht"
+      - "unitized height"
+      - "floor-to-floor"
+    extraction_type: LINEAR
+    unit: mm
+    dimension_direction: VERTICAL
+    relevant_sheet_types: [ELEVATION, SECTION, DETAIL]
+    relevant_layer_groups: [structural_frame, annotation]
+    spec_value: null
+    spec_tolerance: null
+    confidence_threshold: 0.50
+
+  # ── 2. Mullion / Transom Profiles ──────────────────────────────────────────
+
+  - id: 3
+    name: "Mullion Face Width"
+    aliases:
+      - "mullion width"
+      - "vertical member width"
+      - "post face width"
+      - "mullion face"
+      - "vertical width"
+      - "mull face"
+    extraction_type: LINEAR
+    unit: mm
+    dimension_direction: HORIZONTAL
+    relevant_sheet_types: [SECTION, DETAIL]
+    relevant_layer_groups: [structural_frame, annotation]
+    spec_value: null
+    spec_tolerance: null
+    confidence_threshold: 0.50
+
+  - id: 4
+    name: "Transom Depth"
+    aliases:
+      - "transom depth"
+      - "horizontal member depth"
+      - "rail depth"
+      - "transom d"
+      - "horizontal depth"
+    extraction_type: LINEAR
+    unit: mm
+    dimension_direction: VERTICAL
+    relevant_sheet_types: [SECTION, DETAIL]
+    relevant_layer_groups: [structural_frame, annotation]
+    spec_value: null
+    spec_tolerance: null
+    confidence_threshold: 0.50
+
+  # ── 3. Glass / IGU Build-up ────────────────────────────────────────────────
+
+  - id: 5
+    name: "Glass Thickness"
+    aliases:
+      - "glazing thickness"
+      - "glass thk"
+      - "glass t"
+      - "pane thickness"
+      - "lite thickness"
+      - "dgu thickness"
+      - "igu thickness"
+      - "glazing thk"
+    extraction_type: LINEAR
+    unit: mm
+    dimension_direction: ANY
+    relevant_sheet_types: [SECTION, DETAIL]
+    relevant_layer_groups: [glazing, annotation]
+    spec_value: null
+    spec_tolerance: null
+    confidence_threshold: 0.50
+
+  - id: 6
+    name: "Air Gap Width"
+    aliases:
+      - "cavity width"
+      - "air space"
+      - "interlayer gap"
+      - "cavity gap"
+      - "air cavity"
+      - "spacer width"
+    extraction_type: LINEAR
+    unit: mm
+    dimension_direction: ANY
+    relevant_sheet_types: [SECTION, DETAIL]
+    relevant_layer_groups: [glazing, annotation]
+    spec_value: null
+    spec_tolerance: null
+    confidence_threshold: 0.50
+
+  # ── 4. Structural Extrusion / Section Properties ───────────────────────────
+
+  - id: 7
+    name: "Extrusion Wall Thickness"
+    aliases:
+      - "wall thickness"
+      - "section wall"
+      - "extrusion wall thk"
+      - "profile wall"
+      - "wall thk"
+      - "min wall"
+      - "structural wall thickness"
+    extraction_type: LINEAR
+    unit: mm
+    dimension_direction: ANY
+    relevant_sheet_types: [SECTION, DETAIL]
+    relevant_layer_groups: [structural_frame, annotation]
+    spec_value: null
+    spec_tolerance: null
+    confidence_threshold: 0.50
+
+  - id: 8
+    name: "Section Profile Size"
+    aliases:
+      - "section size"
+      - "profile size"
+      - "section dimensions"
+      - "profile dimensions"
+      - "extrusion size"
+    extraction_type: COMPOUND
+    unit: mm
+    dimension_direction: ANY
+    relevant_sheet_types: [SECTION, DETAIL]
+    relevant_layer_groups: [structural_frame, annotation]
+    spec_value: null
+    spec_tolerance: null
+    confidence_threshold: 0.50
+
+  # ── 5. Fixing / Bracket Geometry ───────────────────────────────────────────
+
+  - id: 9
+    name: "Bracket Projection"
+    aliases:
+      - "bracket depth"
+      - "standoff distance"
+      - "anchor projection"
+      - "bracket standoff"
+      - "fixing projection"
+      - "bracket reach"
+    extraction_type: LINEAR
+    unit: mm
+    dimension_direction: HORIZONTAL
+    relevant_sheet_types: [SECTION, DETAIL]
+    relevant_layer_groups: [fixings, annotation]
+    spec_value: null
+    spec_tolerance: null
+    confidence_threshold: 0.50
+
+  - id: 10
+    name: "Bracket Vertical Spacing"
+    aliases:
+      - "bracket spacing"
+      - "fixing spacing"
+      - "anchor spacing vertical"
+      - "bracket c/c"
+      - "anchor c/c"
+      - "fixing c/c"
+    extraction_type: SPACING
+    unit: mm
+    dimension_direction: VERTICAL
+    relevant_sheet_types: [ELEVATION, SECTION, DETAIL]
+    relevant_layer_groups: [fixings, annotation]
+    spec_value: null
+    spec_tolerance: null
+    confidence_threshold: 0.45
+
+  # ── 6. Sealing / Weatherproofing ───────────────────────────────────────────
+
+  - id: 11
+    name: "Joint Width"
+    aliases:
+      - "sealant joint"
+      - "panel joint"
+      - "movement joint"
+      - "joint gap"
+      - "sealant gap"
+      - "joint width"
+    extraction_type: LINEAR
+    unit: mm
+    dimension_direction: ANY
+    relevant_sheet_types: [DETAIL, SECTION]
+    relevant_layer_groups: [sealing, annotation]
+    spec_value: null
+    spec_tolerance: null
+    confidence_threshold: 0.50
+
+  - id: 12
+    name: "Sealant Bite"
+    aliases:
+      - "sealant contact"
+      - "bite depth"
+      - "sealant depth"
+      - "contact width"
+      - "glazing bite"
+      - "structural bite"
+    extraction_type: LINEAR
+    unit: mm
+    dimension_direction: ANY
+    relevant_sheet_types: [DETAIL, SECTION]
+    relevant_layer_groups: [sealing, annotation]
+    spec_value: null
+    spec_tolerance: null
+    confidence_threshold: 0.50
+
+  # ── 7. Insulation / Fire Stop ──────────────────────────────────────────────
+
+  - id: 13
+    name: "Insulation Thickness"
+    aliases:
+      - "insul thickness"
+      - "insulation thk"
+      - "thermal insulation"
+      - "mineral wool thickness"
+      - "rockwool thickness"
+      - "insulation t"
+    extraction_type: LINEAR
+    unit: mm
+    dimension_direction: ANY
+    relevant_sheet_types: [SECTION, DETAIL]
+    relevant_layer_groups: [insulation, annotation]
+    spec_value: null
+    spec_tolerance: null
+    confidence_threshold: 0.50
+
+  - id: 14
+    name: "Fire Stop Depth"
+    aliases:
+      - "firestop depth"
+      - "fire barrier depth"
+      - "smoke seal depth"
+      - "intumescent depth"
+      - "fire stop"
+    extraction_type: LINEAR
+    unit: mm
+    dimension_direction: ANY
+    relevant_sheet_types: [SECTION, DETAIL]
+    relevant_layer_groups: [insulation, annotation]
+    spec_value: null
+    spec_tolerance: null
+    confidence_threshold: 0.50
+
+  # ── 8. Cladding Panels ─────────────────────────────────────────────────────
+
+  - id: 15
+    name: "Cladding Panel Size"
+    aliases:
+      - "acp size"
+      - "panel size"
+      - "cassette size"
+      - "cladding size"
+      - "rainscreen panel"
+      - "panel dimensions"
+    extraction_type: COMPOUND
+    unit: mm
+    dimension_direction: ANY
+    relevant_sheet_types: [ELEVATION, DETAIL]
+    relevant_layer_groups: [cladding, annotation]
+    spec_value: null
+    spec_tolerance: null
+    confidence_threshold: 0.50
+
+  - id: 16
+    name: "Cladding Panel Thickness"
+    aliases:
+      - "acp thickness"
+      - "panel thickness"
+      - "cassette thickness"
+      - "cladding thk"
+      - "panel thk"
+    extraction_type: LINEAR
+    unit: mm
+    dimension_direction: ANY
+    relevant_sheet_types: [SECTION, DETAIL]
+    relevant_layer_groups: [cladding, annotation]
+    spec_value: null
+    spec_tolerance: null
+    confidence_threshold: 0.50
+
+  # ── 9. Railing / Balustrade ────────────────────────────────────────────────
+
+  - id: 17
+    name: "Railing Post Spacing"
+    aliases:
+      - "post spacing"
+      - "baluster spacing"
+      - "post c/c"
+      - "handrail post spacing"
+      - "railing spacing"
+    extraction_type: SPACING
+    unit: mm
+    dimension_direction: HORIZONTAL
+    relevant_sheet_types: [ELEVATION, DETAIL]
+    relevant_layer_groups: [railing, annotation]
+    spec_value: null
+    spec_tolerance: null
+    confidence_threshold: 0.45
+
+  - id: 18
+    name: "Handrail Height"
+    aliases:
+      - "railing height"
+      - "balustrade height"
+      - "guard height"
+      - "handrail level"
+      - "top rail height"
+    extraction_type: LINEAR
+    unit: mm
+    dimension_direction: VERTICAL
+    relevant_sheet_types: [ELEVATION, SECTION, DETAIL]
+    relevant_layer_groups: [railing, annotation]
+    spec_value: null
+    spec_tolerance: null
+    confidence_threshold: 0.50
+
+  # ── 10. Building / Facade Envelope ─────────────────────────────────────────
+
+  - id: 19
+    name: "Parapet Height"
+    aliases:
+      - "parapet"
+      - "parapet level"
+      - "top of parapet"
+      - "cope height"
+      - "parapet ht"
+    extraction_type: LINEAR
+    unit: mm
+    dimension_direction: VERTICAL
+    relevant_sheet_types: [ELEVATION, SECTION]
+    relevant_layer_groups: [structural_frame, annotation]
+    spec_value: null
+    spec_tolerance: null
+    confidence_threshold: 0.50
+
+  - id: 20
+    name: "Sill Height"
+    aliases:
+      - "window sill"
+      - "sill level"
+      - "sill height"
+      - "bottom of glazing"
+      - "glazing sill"
+      - "sill ht"
+    extraction_type: LINEAR
+    unit: mm
+    dimension_direction: VERTICAL
+    relevant_sheet_types: [ELEVATION, SECTION, DETAIL]
+    relevant_layer_groups: [structural_frame, glazing, annotation]
+    spec_value: null
+    spec_tolerance: null
+    confidence_threshold: 0.50
