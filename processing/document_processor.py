@@ -29,10 +29,15 @@ from parsing.pdf_parser import PDFParser
 logger = logging.getLogger(__name__)
 
 # ── constants ────────────────────────────────────────────────────────────────
-CHUNK_SIZE = 512  # target tokens per chunk
-CHUNK_OVERLAP = 64  # overlap tokens between consecutive chunks
-EMBED_BATCH_SIZE = 64  # max texts per embedding API call
-PARAM_BATCH_SIZE = 1800  # chunks sent per LLM parameter-extraction call
+# Hierarchical chunking sizes (words, not tokens — a reasonable proxy)
+CHILD_SIZE        = 200   # level-1 child chunk: ~200 words, precise for retrieval
+PARENT_MAX_WORDS  = 3000  # level-0 parent cap: long sections are split here
+EMBED_BATCH_SIZE  = 64    # max texts per embedding API call
+PARAM_BATCH_SIZE  = 1800  # chunks sent per LLM parameter-extraction call
+
+# Legacy constants kept for reference — no longer used in new pipeline
+CHUNK_SIZE    = 512
+CHUNK_OVERLAP = 64
 
 class DocumentProcessor:
     """Main processing orchestrator"""
@@ -141,123 +146,137 @@ class DocumentProcessor:
 
         return blocks
 
-    def _chunk_with_metadata(
+    def _build_hierarchical_chunks(
             self,
             parsed_content: List[Dict],
             document,
-    ) -> List[Dict]:
+    ) -> tuple[List[Dict], List[Dict]]:
         """
-        Merge consecutive non-heading text blocks into fixed-size chunks
-        (by word count as a token proxy) with CHUNK_OVERLAP words of
-        overlap.  Table blocks are always emitted as standalone chunks so
-        their tabular structure is never split mid-row.
+        Build a two-level hierarchy of chunks from parsed document blocks.
 
-        Returned chunk schema:
-            {
-                "chunk_index":  int,
-                "text":         str,
-                "document_id":  uuid,
-                "file_type":    str,
-                "page_start":   int | None,
-                "page_end":     int | None,
-                "section":      str | None,
-                "subsection":   str | None,
-                "is_table":     bool,
-            }
+        ── Level 0  (parent / section) ─────────────────────────────────────────
+        One chunk per contiguous (section, subsection) group.  Contains the
+        FULL concatenated text of that section.  Stored in PostgreSQL only —
+        NOT embedded or indexed in Pinecone.  Acts as the rich-context window
+        passed to the LLM after a child-level vector search hits.
+
+        ── Level 1  (child / paragraph) ────────────────────────────────────────
+        ~CHILD_SIZE-word slices within each section, with NO overlap (the
+        parent already provides surrounding context).  These are embedded and
+        indexed in Pinecone for precise retrieval.
+
+        Each child stores:
+          parent_chunk_id → the level-0 chunk for its section
+          prev_chunk_id   → previous sibling in the same section
+          next_chunk_id   → next sibling in the same section
+
+        Very long sections (> PARENT_MAX_WORDS) are split into multiple parent
+        chunks so the LLM context window is never overwhelmed.
+
+        Returns
+        -------
+        (parent_chunks, child_chunks)  –  plain dicts (no SQLAlchemy objects).
+        Each dict contains a pre-assigned ``chunk_id`` UUID so that children
+        can reference parent IDs before any DB write.
         """
-        chunks: List[Dict] = []
-        chunk_index = 0
-
-        # Rolling word buffer for text blocks
-        word_buffer: List[str] = []
-        meta_buffer: Dict = {
-            "page_start": None,
-            "page_end": None,
-            "section": None,
-            "subsection": None,
-        }
-
-        def flush_buffer(final: bool = False) -> None:
-            """Emit a chunk from the current word buffer."""
-            nonlocal chunk_index
-
-            if not word_buffer:
-                return
-
-            # Determine how many words to keep as overlap for the next chunk
-            overlap_words = word_buffer[-CHUNK_OVERLAP:] if not final else []
-
-            chunks.append({
-                "chunk_index": chunk_index,
-                "text": " ".join(word_buffer),
-                "document_id": document.document_id,
-                "file_type": document.file_type,
-                **meta_buffer,
-                "is_table": False,
-            })
-            chunk_index += 1
-
-            # Reset buffer, keeping overlap
-            word_buffer.clear()
-            word_buffer.extend(overlap_words)
-            # Overlap words come from the end of the flushed chunk — advance page_start
-            if overlap_words:
-                meta_buffer["page_start"] = meta_buffer["page_end"]
+        # ── Phase 1: group blocks into contiguous sections ───────────────────
+        sections: List[Dict] = []
+        current: Dict | None = None
 
         for block in parsed_content:
-            # ── skip pure headings (they're captured in section/subsection) ──
             if block.get("is_heading"):
                 continue
 
-            # ── tables → always standalone chunks ────────────────────────────
-            if block["type"] == "table":
-                flush_buffer()  # emit any buffered text first
-                chunks.append({
-                    "chunk_index": chunk_index,
-                    "text": block["text"],
-                    "document_id": document.document_id,
-                    "file_type": document.file_type,
-                    "page_start": block.get("page"),
-                    "page_end": block.get("page"),
-                    "section": block.get("section"),
+            sec_key = (block.get("section"), block.get("subsection"))
+            if current is None or current["sec_key"] != sec_key:
+                current = {
+                    "sec_key":   sec_key,
+                    "section":   block.get("section"),
                     "subsection": block.get("subsection"),
-                    "is_table": True,
-                })
-                chunk_index += 1
+                    "page_start": block.get("page"),
+                    "page_end":   block.get("page"),
+                    "all_words":  [],
+                    "is_table":   block["type"] == "table",
+                }
+                sections.append(current)
+
+            current["all_words"].extend(block["text"].split())
+            if block.get("page") is not None:
+                current["page_end"] = block.get("page")
+            if block["type"] != "table":
+                current["is_table"] = False   # mixed → not a pure table section
+
+        # ── Phase 2: produce parent + child chunks ───────────────────────────
+        parents:  List[Dict] = []
+        children: List[Dict] = []
+        chunk_idx = 0   # shared sequential counter preserves document order
+
+        for sec in sections:
+            all_words = sec["all_words"]
+            if not all_words:
                 continue
 
-            # ── text blocks → accumulate into rolling word buffer ─────────────
-            words = block["text"].split()
+            # Split very long sections into ≤PARENT_MAX_WORDS parent windows
+            # so no single LLM context is gigantic.
+            for p_start in range(0, len(all_words), PARENT_MAX_WORDS):
+                parent_words = all_words[p_start : p_start + PARENT_MAX_WORDS]
+                parent_id    = uuid.uuid4()
 
-            # Update page / section metadata from the *first* block in buffer
-            if not word_buffer:
-                meta_buffer["page_start"] = block.get("page")
-                meta_buffer["section"] = block.get("section")
-                meta_buffer["subsection"] = block.get("subsection")
-
-            meta_buffer["page_end"] = block.get("page")
-            word_buffer.extend(words)
-
-            # Flush when the buffer is large enough
-            while len(word_buffer) >= CHUNK_SIZE:
-                # Emit exactly CHUNK_SIZE words
-                emit_words = word_buffer[:CHUNK_SIZE]
-                chunks.append({
-                    "chunk_index": chunk_index,
-                    "text": " ".join(emit_words),
-                    "document_id": document.document_id,
-                    "file_type": document.file_type,
-                    **meta_buffer,
-                    "is_table": False,
+                parents.append({
+                    "chunk_id":        parent_id,
+                    "chunk_index":     chunk_idx,
+                    "chunk_level":     0,
+                    "text":            " ".join(parent_words),
+                    "document_id":     document.document_id,
+                    "file_type":       document.file_type,
+                    "page_start":      sec["page_start"],
+                    "page_end":        sec["page_end"],
+                    "section":         sec["section"],
+                    "subsection":      sec["subsection"],
+                    "is_table":        sec["is_table"],
+                    "parent_chunk_id": None,
+                    "prev_chunk_id":   None,
+                    "next_chunk_id":   None,
                 })
-                chunk_index += 1
-                # Slide window forward (keep overlap)
-                word_buffer[:] = word_buffer[CHUNK_SIZE - CHUNK_OVERLAP:]
-                # Overlap content is from the current page — advance page_start
-                meta_buffer["page_start"] = meta_buffer["page_end"]
+                chunk_idx += 1
 
-        flush_buffer(final=True)
-        return chunks
+                # Slice parent into CHILD_SIZE children
+                section_children: List[Dict] = []
+                for c_start in range(0, len(parent_words), CHILD_SIZE):
+                    child_words = parent_words[c_start : c_start + CHILD_SIZE]
+                    if not child_words:
+                        continue
+                    section_children.append({
+                        "chunk_id":        uuid.uuid4(),
+                        "chunk_index":     chunk_idx,
+                        "chunk_level":     1,
+                        "text":            " ".join(child_words),
+                        "document_id":     document.document_id,
+                        "file_type":       document.file_type,
+                        "page_start":      sec["page_start"],
+                        "page_end":        sec["page_end"],
+                        "section":         sec["section"],
+                        "subsection":      sec["subsection"],
+                        "is_table":        False,
+                        "parent_chunk_id": parent_id,
+                        "prev_chunk_id":   None,   # wired below
+                        "next_chunk_id":   None,
+                    })
+                    chunk_idx += 1
+
+                # Wire doubly-linked list within the parent window
+                for j, child in enumerate(section_children):
+                    if j > 0:
+                        child["prev_chunk_id"] = section_children[j - 1]["chunk_id"]
+                        section_children[j - 1]["next_chunk_id"] = child["chunk_id"]
+
+                children.extend(section_children)
+
+        logger.info(
+            f"[CHUNK] doc={document.original_filename}: "
+            f"{len(parents)} section-parents, {len(children)} child chunks"
+        )
+        return parents, children
 
     def _generate_embeddings(self, texts: List[str]) -> List[List[float]]:
         """
@@ -276,48 +295,76 @@ class DocumentProcessor:
 
     def _store_chunks(
             self,
-            chunks: List[Dict],
-            embeddings: List[List[float]],
+            parent_chunks: List[Dict],
+            child_chunks: List[Dict],
+            child_embeddings: List[List[float]],
             document,
     ) -> None:
         """
-        Persist chunks to:
-          • PostgreSQL  – one DocumentChunk row per chunk (full text + metadata)
-          • Pinecone    – one vector per chunk (embedding + lightweight metadata)
+        Persist to PostgreSQL and Pinecone.
 
-        Pinecone vector id format:  "{document_id}_{chunk_index}"
+        • Level-0 parents  → PostgreSQL only  (no Pinecone entry)
+        • Level-1 children → PostgreSQL + Pinecone vector
+
+        Pinecone vector id format: "{document_id}_{chunk_index}"
         """
-        pinecone_vectors: List[Dict] = []
-
-        for chunk, embedding in zip(chunks, embeddings):
-            vector_id = f"{document.document_id}_{chunk['chunk_index']}"
-
-            # ── PostgreSQL ────────────────────────────────────────────────────
+        # ── Insert level-0 parent chunks (DB only) ────────────────────────────
+        for chunk in parent_chunks:
             db_chunk = DocumentChunk(
+                chunk_id=chunk["chunk_id"],
                 document_id=document.document_id,
                 project_id=self.project_id,
                 chunk_index=chunk["chunk_index"],
+                chunk_level=0,
                 chunk_text=chunk["text"],
-                page_number=chunk.get("page_start") or chunk.get("page"),
+                page_number=chunk.get("page_start"),
                 section_title=chunk.get("section"),
                 subsection_title=chunk.get("subsection"),
-                pinecone_id=vector_id,
+                pinecone_id=None,                   # not indexed in Pinecone
+                parent_chunk_id=None,
+                prev_chunk_id=None,
+                next_chunk_id=None,
             )
             self.db.add(db_chunk)
 
-            # ── Pinecone vector (batched below) ───────────────────────────────
+        # Flush parents first so children can FK-reference them
+        self.db.flush()
+
+        # ── Insert level-1 child chunks + build Pinecone vectors ─────────────
+        pinecone_vectors: List[Dict] = []
+
+        for chunk, embedding in zip(child_chunks, child_embeddings):
+            vector_id = f"{document.document_id}_{chunk['chunk_index']}"
+
+            db_chunk = DocumentChunk(
+                chunk_id=chunk["chunk_id"],
+                document_id=document.document_id,
+                project_id=self.project_id,
+                chunk_index=chunk["chunk_index"],
+                chunk_level=1,
+                chunk_text=chunk["text"],
+                page_number=chunk.get("page_start"),
+                section_title=chunk.get("section"),
+                subsection_title=chunk.get("subsection"),
+                pinecone_id=vector_id,
+                parent_chunk_id=chunk.get("parent_chunk_id"),
+                prev_chunk_id=chunk.get("prev_chunk_id"),
+                next_chunk_id=chunk.get("next_chunk_id"),
+            )
+            self.db.add(db_chunk)
+
             pinecone_vectors.append({
                 "id": vector_id,
                 "values": embedding,
                 "metadata": {
                     "document_id": str(document.document_id),
-                    "project_id": str(self.project_id),
-                    "file_type": document.file_type,
-                    "section": chunk.get("section") or "",
-                    "subsection": chunk.get("subsection") or "",
-                    "page_start": chunk.get("page_start") or 0,
-                    "is_table": chunk.get("is_table", False),
-                    # Store a short preview so Pinecone metadata is searchable
+                    "project_id":  str(self.project_id),
+                    "file_type":   document.file_type,
+                    "section":     chunk.get("section") or "",
+                    "subsection":  chunk.get("subsection") or "",
+                    "page_start":  chunk.get("page_start") or 0,
+                    "is_table":    chunk.get("is_table", False),
+                    "chunk_level": 1,
                     "text_preview": chunk["text"][:200],
                 },
             })
@@ -485,26 +532,26 @@ class DocumentProcessor:
         self._extract_all_parameters()
 
     def _process_specification_document(self, document):
-        """Process PDF/DOCX specification"""
+        """Process PDF/DOCX specification using hierarchical chunking."""
 
-        # Step 1: Parse document
+        # Step 1: Parse document into raw blocks
         if document.file_type == 'pdf_spec':
             parsed_content = self._parse_pdf(document.file_path)
         else:  # docx_spec
             parsed_content = self._parse_docx(document.file_path)
 
-        # Step 2: Chunk with metadata preservation
-        chunks = self._chunk_with_metadata(parsed_content, document)
+        # Step 2: Build section-parent + paragraph-child chunk hierarchy
+        parents, children = self._build_hierarchical_chunks(parsed_content, document)
 
-        # Step 3: Generate embeddings
-        embeddings = self._generate_embeddings([c['text'] for c in chunks])
+        # Step 3: Embed only child chunks (parents are context, not queries)
+        child_embeddings = self._generate_embeddings([c['text'] for c in children])
 
-        # Step 4: Store in Pinecone + PostgreSQL
-        self._store_chunks(chunks, embeddings, document)
+        # Step 4: Store parents (DB only) + children (DB + Pinecone)
+        self._store_chunks(parents, children, child_embeddings, document)
 
-        # Mark as processed
+        # Mark as processed — report searchable child count
         document.processed = True
-        document.num_chunks = len(chunks)
+        document.num_chunks = len(children)
         self.db.commit()
 
     def _process_boq_document(self, document):

@@ -15,7 +15,7 @@ import uuid
 import shutil
 from pathlib import Path
 from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import sessionmaker, Session, joinedload
 
 from pinecone import Pinecone
 
@@ -87,6 +87,28 @@ def on_startup():
     with engine.connect() as conn:
         conn.execute(text(
             "ALTER TABLE extracted_parameters ADD COLUMN IF NOT EXISTS source_pages TEXT"
+        ))
+        # ── Hierarchical chunking columns (parent-child chunk strategy) ───────
+        # chunk_level: 0=section parent (not in Pinecone), 1=child (in Pinecone)
+        conn.execute(text(
+            "ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS "
+            "chunk_level INTEGER NOT NULL DEFAULT 1"
+        ))
+        # parent_chunk_id: level-1 children reference their level-0 section parent
+        conn.execute(text(
+            "ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS "
+            "parent_chunk_id UUID REFERENCES document_chunks(chunk_id) ON DELETE SET NULL"
+        ))
+        # prev/next links for in-section traversal
+        conn.execute(text(
+            "ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS prev_chunk_id UUID"
+        ))
+        conn.execute(text(
+            "ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS next_chunk_id UUID"
+        ))
+        # parent chunks have no Pinecone ID — make the column nullable
+        conn.execute(text(
+            "ALTER TABLE document_chunks ALTER COLUMN pinecone_id DROP NOT NULL"
         ))
         conn.commit()
 
@@ -442,14 +464,35 @@ async def adhoc_query(project_id: uuid.UUID, query: str = Form(...), db: Session
     )
 
     chunk_ids = [match["id"] for match in results["matches"]]
-    chunks = db.query(DocumentChunk).filter(
+    child_chunks = db.query(DocumentChunk).options(
+        joinedload(DocumentChunk.document)
+    ).filter(
         DocumentChunk.pinecone_id.in_(chunk_ids)
     ).all()
+
+    # Hierarchical context expansion: prefer full section (parent) over fragment (child)
+    parent_ids = [c.parent_chunk_id for c in child_chunks if c.parent_chunk_id]
+    parent_map = {}
+    if parent_ids:
+        parent_rows = db.query(DocumentChunk).options(
+            joinedload(DocumentChunk.document)
+        ).filter(DocumentChunk.chunk_id.in_(parent_ids)).all()
+        parent_map = {p.chunk_id: p for p in parent_rows}
+
+    seen_parents: set = set()
+    context_chunks = []
+    for child in child_chunks:
+        if child.parent_chunk_id and child.parent_chunk_id in parent_map:
+            if child.parent_chunk_id not in seen_parents:
+                seen_parents.add(child.parent_chunk_id)
+                context_chunks.append(parent_map[child.parent_chunk_id])
+        else:
+            context_chunks.append(child)
 
     context = "\n\n".join([
         f"[Source {i+1}: {chunk.document.original_filename}, Page {chunk.page_number or 'N/A'}, "
         f"Section: {chunk.section_title or 'N/A'}]\n{chunk.chunk_text}"
-        for i, chunk in enumerate(chunks[:3])
+        for i, chunk in enumerate(context_chunks[:3])
     ])
 
     system_prompt = """You are an expert tender analyst. Answer questions based ONLY on the provided context.

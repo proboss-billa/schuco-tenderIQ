@@ -99,7 +99,7 @@ Include ALL sources in source_numbers that contain relevant information, not jus
     # ── Sync search (used by legacy sync path) ────────────────────────────────
 
     def _search_relevant_chunks(self, project_id: str, query: str, top_k: int = 5) -> List[Dict]:
-        """Search Pinecone + DB, return plain dicts (no SQLAlchemy objects)."""
+        """Search Pinecone + DB, expand to parent sections, return plain dicts."""
         query_embedding = self.embedder.embed([query])[0]
 
         results = self.pinecone.query(
@@ -115,17 +115,37 @@ Include ALL sources in source_numbers that contain relevant information, not jus
 
         scores = {m['id']: m['score'] for m in results['matches']}
 
-        chunks = (
+        child_chunks = (
             self.db.query(DocumentChunk)
             .options(joinedload(DocumentChunk.document))
             .filter(DocumentChunk.pinecone_id.in_(chunk_ids))
             .all()
         )
 
-        return sorted(
-            [self._chunk_to_dict(c, scores.get(c.pinecone_id, 0)) for c in chunks],
-            key=lambda x: x['score'], reverse=True
-        )
+        # Expand to parent sections for hierarchical chunks
+        parent_ids = [c.parent_chunk_id for c in child_chunks if c.parent_chunk_id]
+        parent_map: Dict = {}
+        if parent_ids:
+            parent_rows = (
+                self.db.query(DocumentChunk)
+                .options(joinedload(DocumentChunk.document))
+                .filter(DocumentChunk.chunk_id.in_(parent_ids))
+                .all()
+            )
+            parent_map = {p.chunk_id: p for p in parent_rows}
+
+        seen: set = set()
+        enriched: List[Dict] = []
+        for child in child_chunks:
+            score = scores.get(child.pinecone_id, 0)
+            if child.parent_chunk_id and child.parent_chunk_id in parent_map:
+                if child.parent_chunk_id not in seen:
+                    seen.add(child.parent_chunk_id)
+                    enriched.append(self._chunk_to_dict(parent_map[child.parent_chunk_id], score))
+            else:
+                enriched.append(self._chunk_to_dict(child, score))
+
+        return sorted(enriched, key=lambda x: x['score'], reverse=True)
 
     @staticmethod
     def _chunk_to_dict(chunk, score: float) -> Dict:
@@ -138,6 +158,7 @@ Include ALL sources in source_numbers that contain relevant information, not jus
             'document_name':    chunk.document.original_filename if chunk.document else None,
             'document_id':      str(chunk.document_id),
             'chunk_id':         str(chunk.chunk_id),
+            'chunk_level':      getattr(chunk, 'chunk_level', 1),  # 0=parent, 1=child
             'score':            score,
         }
 
@@ -279,25 +300,57 @@ Include ALL sources in source_numbers that contain relevant information, not jus
                 logger.info(f"[EXTRACT][{param_config['name']}] No Pinecone results → skipping")
                 return {'parameter_name': param_config['name'], 'found': False, 'reason': 'No relevant content found'}
 
-            # Step 3: DB query in the main async thread — single session, no threads, safe
+            # Step 3: DB query — load child chunks matched by Pinecone
             scores = {m['id']: m['score'] for m in pinecone_results['matches']}
-            chunks = (
+            child_chunks = (
                 self.db.query(DocumentChunk)
                 .options(joinedload(DocumentChunk.document))
                 .filter(DocumentChunk.pinecone_id.in_(chunk_ids))
                 .all()
             )
-            logger.info(f"[EXTRACT][{param_config['name']}] DB found {len(chunks)} chunks")
+            logger.info(f"[EXTRACT][{param_config['name']}] DB found {len(child_chunks)} child chunks")
 
-            if not chunks:
+            if not child_chunks:
                 logger.info(f"[EXTRACT][{param_config['name']}] 0 DB chunks despite {len(chunk_ids)} Pinecone hits — project_id filter mismatch?")
                 return {'parameter_name': param_config['name'], 'found': False, 'reason': 'No chunks found in DB'}
 
-            # Convert to plain dicts immediately — no SQLAlchemy objects cross thread boundary
-            chunk_dicts = sorted(
-                [self._chunk_to_dict(c, scores.get(c.pinecone_id, 0)) for c in chunks],
-                key=lambda x: x['score'], reverse=True
-            )
+            # ── Hierarchical context expansion ────────────────────────────────
+            # For each child chunk that has a parent (section-level chunk), load
+            # the parent instead.  The parent contains the FULL section text, so
+            # the LLM sees complete information rather than a mid-sentence fragment.
+            # Legacy chunks (parent_chunk_id=None) fall back to using themselves.
+            parent_ids = [
+                c.parent_chunk_id for c in child_chunks
+                if c.parent_chunk_id is not None
+            ]
+            parent_map: Dict = {}
+            if parent_ids:
+                parent_rows = (
+                    self.db.query(DocumentChunk)
+                    .options(joinedload(DocumentChunk.document))
+                    .filter(DocumentChunk.chunk_id.in_(parent_ids))
+                    .all()
+                )
+                parent_map = {p.chunk_id: p for p in parent_rows}
+                logger.info(
+                    f"[EXTRACT][{param_config['name']}] Loaded {len(parent_map)} parent sections"
+                )
+
+            # Build deduplicated context list — one entry per unique parent section
+            seen_parent_ids: set = set()
+            enriched: List[Dict] = []
+            for child in child_chunks:
+                score = scores.get(child.pinecone_id, 0)
+                if child.parent_chunk_id and child.parent_chunk_id in parent_map:
+                    if child.parent_chunk_id not in seen_parent_ids:
+                        seen_parent_ids.add(child.parent_chunk_id)
+                        parent = parent_map[child.parent_chunk_id]
+                        enriched.append(self._chunk_to_dict(parent, score))
+                else:
+                    # Legacy chunk or orphaned child — use as-is
+                    enriched.append(self._chunk_to_dict(child, score))
+
+            chunk_dicts = sorted(enriched, key=lambda x: x['score'], reverse=True)
             context = self._build_context(chunk_dicts)
 
             # Step 4: LLM call in thread — only plain strings, no SQLAlchemy
