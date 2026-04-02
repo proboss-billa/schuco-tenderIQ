@@ -10,11 +10,13 @@ from google import genai
 from google.genai import types
 from google.genai.errors import ClientError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from sqlalchemy.orm import joinedload
 
 from processing.document_processor import logger
 
 import asyncio
 from typing import Dict, List
+
 
 class ParameterExtractor:
     """Extract facade parameters using LLM"""
@@ -22,19 +24,19 @@ class ParameterExtractor:
     def __init__(self, pinecone_index, embedding_client, db_session, session_factory=None):
         self.pinecone = pinecone_index
         self.embedder = embedding_client
-        # self.llm = llm_client
         self.db = db_session
-        # session_factory lets each search thread use its own isolated session
         self.session_factory = session_factory
         self.gemini = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+    # ── LLM call (blocking, safe to run in a thread — no SQLAlchemy) ─────────
 
     @retry(
         stop=stop_after_attempt(5),
         wait=wait_exponential(multiplier=1, min=8, max=60),
         retry=retry_if_exception_type(ClientError)
     )
-    def extract_facade_parameter(self, param_config, context):
-        # System instructions keep the "Analyst" persona consistent
+    def _call_llm(self, param_config: Dict, context: str) -> str:
+        """Call Gemini and return raw JSON string. Receives only plain strings."""
         system_instr = "You are an expert extracting technical parameters from facade/curtain wall specifications."
 
         value_type = param_config.get('value_type', 'text')
@@ -75,7 +77,6 @@ Set "found" to true if ANY relevant information for this parameter is present in
 Set "found" to false only if the parameter is completely absent from the context.
 Include ALL sources in source_numbers that contain relevant information, not just the primary one.
 """
-        logger.info(prompt)
         try:
             response = self.gemini.models.generate_content(
                 model="gemini-3-flash-preview",
@@ -86,7 +87,7 @@ Include ALL sources in source_numbers that contain relevant information, not jus
                 ),
                 contents=prompt
             )
-            logger.info(response.text)
+            logger.info(f"LLM response for {param_config['display_name']}: {response.text}")
             return response.text
 
         except ClientError as e:
@@ -95,52 +96,12 @@ Include ALL sources in source_numbers that contain relevant information, not jus
                 raise e
             raise e
 
-    def extract_all_parameters(self, project_id: str) -> List[Dict]:
-        """Extract all 25 parameters for a project"""
-
-        results = []
-
-        for param_config in FACADE_PARAMETERS:
-            extraction = self.extract_single_parameter(project_id, param_config)
-            logger.info(f"Extracted {param_config['name']}: {extraction}")
-            results.append(extraction)
-
-            # Store in database
-            if extraction.get('found'):
-                self._store_extraction(project_id, param_config, extraction)
-
-        return results
-
-    def extract_single_parameter(self, project_id: str, param_config: Dict) -> Dict:
-        """Extract one parameter"""
-
-        # Step 1: Semantic search for relevant chunks
-        query = f"{param_config['description']} {' '.join(param_config['search_keywords'])}"
-        relevant_chunks = self._search_relevant_chunks(project_id, query, top_k=5)
-
-        if not relevant_chunks:
-            return {
-                'parameter_name': param_config['name'],
-                'found': False,
-                'reason': 'No relevant content found'
-            }
-
-        # Step 2: LLM extraction with structured prompt
-        extraction_result = self._llm_extract(param_config, relevant_chunks)
-
-        return extraction_result
+    # ── Sync search (used by legacy sync path) ────────────────────────────────
 
     def _search_relevant_chunks(self, project_id: str, query: str, top_k: int = 5) -> List[Dict]:
-        """Search Pinecone for relevant chunks.
-
-        Uses an isolated DB session when session_factory is provided so this
-        method is safe to call from multiple concurrent threads.
-        """
-
-        # Generate query embedding
+        """Search Pinecone + DB, return plain dicts (no SQLAlchemy objects)."""
         query_embedding = self.embedder.embed([query])[0]
 
-        # Search Pinecone with project filter
         results = self.pinecone.query(
             vector=query_embedding,
             top_k=top_k,
@@ -149,201 +110,204 @@ Include ALL sources in source_numbers that contain relevant information, not jus
         )
 
         chunk_ids = [match['id'] for match in results['matches']]
+        if not chunk_ids:
+            return []
 
-        # Use a fresh session per call to avoid shared-session threading issues
-        db = self.session_factory() if self.session_factory else self.db
+        scores = {m['id']: m['score'] for m in results['matches']}
+
+        chunks = (
+            self.db.query(DocumentChunk)
+            .options(joinedload(DocumentChunk.document))
+            .filter(DocumentChunk.pinecone_id.in_(chunk_ids))
+            .all()
+        )
+
+        return sorted(
+            [self._chunk_to_dict(c, scores.get(c.pinecone_id, 0)) for c in chunks],
+            key=lambda x: x['score'], reverse=True
+        )
+
+    @staticmethod
+    def _chunk_to_dict(chunk, score: float) -> Dict:
+        """Convert a SQLAlchemy DocumentChunk (with loaded document) to a plain dict."""
+        return {
+            'chunk_text':       chunk.chunk_text,
+            'page_number':      chunk.page_number,
+            'section_title':    chunk.section_title,
+            'subsection_title': chunk.subsection_title,
+            'document_name':    chunk.document.original_filename if chunk.document else None,
+            'document_id':      str(chunk.document_id),
+            'chunk_id':         str(chunk.chunk_id),
+            'score':            score,
+        }
+
+    # ── Build LLM context from plain dicts ───────────────────────────────────
+
+    @staticmethod
+    def _build_context(chunk_dicts: List[Dict]) -> str:
+        parts = []
+        for i, c in enumerate(chunk_dicts[:3], 1):
+            parts.append(
+                f"[Source {i}]\n"
+                f"Document: {c['document_name']}\n"
+                f"Page: {c['page_number']}\n"
+                f"Section: {c['section_title'] or 'N/A'}\n"
+                f"Subsection: {c['subsection_title'] or 'N/A'}\n"
+                f"Content: {c['chunk_text']}\n"
+            )
+        return "\n\n".join(parts)
+
+    # ── Parse LLM JSON response ───────────────────────────────────────────────
+
+    def _parse_llm_response(self, response_text: str, param_config: Dict, chunk_dicts: List[Dict]) -> Dict:
         try:
-            from sqlalchemy.orm import joinedload
-            chunks = (
-                db.query(DocumentChunk)
-                .options(joinedload(DocumentChunk.document))  # eager-load to avoid lazy-load in threads
-                .filter(DocumentChunk.pinecone_id.in_(chunk_ids))
-                .all()
+            result = json.loads(response_text)
+        except json.JSONDecodeError:
+            return {'parameter_name': param_config['name'], 'found': False, 'reason': 'JSON parsing failed'}
+
+        if result.get('found'):
+            raw_sources = result.get('source_numbers') or (
+                [result['source_number']] if result.get('source_number') else []
             )
+            try:
+                source_idxs = [int(s) - 1 for s in raw_sources if str(s).isdigit()]
+            except (ValueError, TypeError):
+                source_idxs = []
 
-            chunks_with_scores = []
-            for chunk in chunks:
-                score = next((m['score'] for m in results['matches'] if m['id'] == chunk.pinecone_id), 0)
-                chunks_with_scores.append({'chunk': chunk, 'score': score})
-
-            chunks_with_scores.sort(key=lambda x: x['score'], reverse=True)
-            return chunks_with_scores
-        finally:
-            if self.session_factory:
-                db.close()
-
-
-    # --- Async versions of your two I/O-bound methods ---
-
-    async def _search_relevant_chunks_async(
-            self, project_id: str, query: str, top_k: int = 5
-    ) -> List[Dict]:
-        """Async wrapper — run the blocking DB/vector search in a thread."""
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            None,  # uses default ThreadPoolExecutor
-            self._search_relevant_chunks,  # your existing sync method
-            project_id, query, top_k
-        )
-
-    async def _llm_extract_async(
-            self, param_config: Dict, relevant_chunks: List[Dict]
-    ) -> Dict:
-        """Async wrapper — run the blocking LLM call in a thread."""
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            None,
-            self._llm_extract,  # your existing sync method
-            param_config, relevant_chunks
-        )
-
-    # --- Core: one param end-to-end, async ---
-
-    async def extract_single_parameter_async(
-            self,
-            project_id: str,
-            param_config: Dict,
-            semaphore: asyncio.Semaphore,
-    ) -> Dict:
-        async with semaphore:  # rate-limit concurrent LLM calls
-            query = (
-                f"{param_config['description']} "
-                f"{' '.join(param_config['search_keywords'])}"
-            )
-
-            relevant_chunks = await self._search_relevant_chunks_async(
-                project_id, query, top_k=5
-            )
-
-            if not relevant_chunks:
-                return {
-                    "parameter_name": param_config["name"],
-                    "found": False,
-                    "reason": "No relevant content found",
+            primary = next((chunk_dicts[i] for i in source_idxs if 0 <= i < len(chunk_dicts)), None)
+            if primary:
+                result['source_metadata'] = {
+                    'document_id':   primary['document_id'],
+                    'document_name': primary['document_name'],
+                    'page':          primary['page_number'],
+                    'section':       primary['section_title'],
+                    'subsection':    primary['subsection_title'],
+                    'chunk_id':      primary['chunk_id'],
                 }
 
-            return await self._llm_extract_async(param_config, relevant_chunks)
+            all_pages = []
+            for i in source_idxs:
+                if 0 <= i < len(chunk_dicts):
+                    pg = chunk_dicts[i]['page_number']
+                    if pg is not None and pg not in all_pages:
+                        all_pages.append(pg)
+            result['all_pages'] = all_pages
 
-    # --- Public entry point: replaces your sequential for-loop ---
+        result['parameter_name'] = param_config['name']
+        return result
+
+    # ── Sync public API (legacy) ──────────────────────────────────────────────
+
+    def extract_all_parameters(self, project_id: str) -> List[Dict]:
+        results = []
+        for param_config in FACADE_PARAMETERS:
+            extraction = self.extract_single_parameter(project_id, param_config)
+            logger.info(f"Extracted {param_config['name']}: {extraction}")
+            results.append(extraction)
+            if extraction.get('found'):
+                self._store_extraction(project_id, param_config, extraction)
+        return results
+
+    def extract_single_parameter(self, project_id: str, param_config: Dict) -> Dict:
+        query = f"{param_config['description']} {' '.join(param_config['search_keywords'])}"
+        chunk_dicts = self._search_relevant_chunks(project_id, query, top_k=5)
+        if not chunk_dicts:
+            return {'parameter_name': param_config['name'], 'found': False, 'reason': 'No relevant content found'}
+        context = self._build_context(chunk_dicts)
+        response_text = self._call_llm(param_config, context)
+        return self._parse_llm_response(response_text, param_config, chunk_dicts)
+
+    # ── Async public API ──────────────────────────────────────────────────────
 
     async def extract_all_parameters_async(
-            self,
-            project_id: str,
-            facade_parameters: List[Dict],
-            max_concurrent: int = 10,  # tune to your LLM rate limit
+        self,
+        project_id: str,
+        facade_parameters: List[Dict],
+        max_concurrent: int = 10,
     ) -> List[Dict]:
         semaphore = asyncio.Semaphore(max_concurrent)
 
         tasks = [
-            self.extract_single_parameter_async(project_id, param, semaphore)
+            self._extract_single_async(project_id, param, semaphore)
             for param in facade_parameters
         ]
 
-        # return_exceptions=True prevents one failure killing all others
         raw_results = await asyncio.gather(*tasks, return_exceptions=True)
 
         results = []
         for param_config, result in zip(facade_parameters, raw_results):
             if isinstance(result, Exception):
                 logger.error(f"Failed {param_config['name']}: {result}")
-                result = {
-                    "parameter_name": param_config["name"],
-                    "found": False,
-                    "reason": f"Exception: {result}",
-                }
+                result = {'parameter_name': param_config['name'], 'found': False, 'reason': str(result)}
             else:
                 logger.info(f"Extracted {param_config['name']}: {result}")
 
             results.append(result)
-
-            if result.get("found"):
+            if result.get('found'):
                 self._store_extraction(project_id, param_config, result)
 
         return results
 
-    def _llm_extract(self, param_config: Dict, relevant_chunks: List[Dict]) -> Dict:
-        """Use LLM to extract parameter value"""
+    async def _extract_single_async(
+        self,
+        project_id: str,
+        param_config: Dict,
+        semaphore: asyncio.Semaphore,
+    ) -> Dict:
+        async with semaphore:
+            loop = asyncio.get_running_loop()
+            query = f"{param_config['description']} {' '.join(param_config['search_keywords'])}"
 
-        # Build context from chunks
-        context_parts = []
-        for i, item in enumerate(relevant_chunks[:3], 1):  # Use top 3
-            chunk = item['chunk']
-            context_parts.append(
-                f"[Source {i}]\n"
-                f"Document: {chunk.document.original_filename}\n"
-                f"Page: {chunk.page_number}\n"
-                f"Section: {chunk.section_title or 'N/A'}\n"
-                f"Subsection: {chunk.subsection_title or 'N/A'}\n"
-                f"Content: {chunk.chunk_text}\n"
+            # Step 1: Embed query in thread (network call, no SQLAlchemy)
+            query_embedding = await loop.run_in_executor(
+                None, lambda: self.embedder.embed([query])[0]
             )
 
-        context = "\n\n".join(context_parts)
-
-        try:
-            response_text = self.extract_facade_parameter(param_config, context)
-
-            # 2. Parse JSON response
-            # Gemini with response_mime_type="application/json" returns a clean string
-            result = json.loads(response_text)
-
-            # 3. Add source metadata — handle both source_numbers (array) and legacy source_number
-            if result.get('found'):
-                # Normalise to a list of ints
-                raw_sources = result.get('source_numbers') or (
-                    [result['source_number']] if result.get('source_number') else []
+            # Step 2: Pinecone search in thread (network call, no SQLAlchemy)
+            pinecone_results = await loop.run_in_executor(
+                None, lambda: self.pinecone.query(
+                    vector=query_embedding,
+                    top_k=5,
+                    filter={"project_id": project_id},
+                    include_metadata=True,
                 )
-                try:
-                    source_idxs = [int(s) - 1 for s in raw_sources if str(s).isdigit()]
-                except (ValueError, TypeError):
-                    source_idxs = []
+            )
 
-                # Primary source = first valid index
-                primary_chunk = None
-                for idx in source_idxs:
-                    if 0 <= idx < len(relevant_chunks):
-                        primary_chunk = relevant_chunks[idx]['chunk']
-                        break
+            chunk_ids = [m['id'] for m in pinecone_results['matches']]
+            if not chunk_ids:
+                return {'parameter_name': param_config['name'], 'found': False, 'reason': 'No relevant content found'}
 
-                if primary_chunk:
-                    result['source_metadata'] = {
-                        'document_id': str(primary_chunk.document_id),
-                        'document_name': primary_chunk.document.original_filename,
-                        'page': primary_chunk.page_number,
-                        'section': primary_chunk.section_title,
-                        'subsection': primary_chunk.subsection_title,
-                        'chunk_id': str(primary_chunk.chunk_id)
-                    }
+            # Step 3: DB query in the main async thread — single session, no threads, safe
+            scores = {m['id']: m['score'] for m in pinecone_results['matches']}
+            chunks = (
+                self.db.query(DocumentChunk)
+                .options(joinedload(DocumentChunk.document))
+                .filter(DocumentChunk.pinecone_id.in_(chunk_ids))
+                .all()
+            )
+            logger.info(f"[{param_config['name']}] Pinecone returned {len(chunk_ids)} ids, DB found {len(chunks)} chunks")
 
-                # Collect all unique pages across all referenced sources
-                all_pages = []
-                for idx in source_idxs:
-                    if 0 <= idx < len(relevant_chunks):
-                        pg = relevant_chunks[idx]['chunk'].page_number
-                        if pg is not None and pg not in all_pages:
-                            all_pages.append(pg)
-                result['all_pages'] = all_pages
+            if not chunks:
+                return {'parameter_name': param_config['name'], 'found': False, 'reason': 'No chunks found in DB'}
 
-            result['parameter_name'] = param_config['name']
-            return result
+            # Convert to plain dicts immediately — no SQLAlchemy objects cross thread boundary
+            chunk_dicts = sorted(
+                [self._chunk_to_dict(c, scores.get(c.pinecone_id, 0)) for c in chunks],
+                key=lambda x: x['score'], reverse=True
+            )
+            context = self._build_context(chunk_dicts)
 
-        except json.JSONDecodeError:
-            return {
-                'parameter_name': param_config['name'],
-                'found': False,
-                'reason': 'Claude JSON parsing failed'
-            }
-        except Exception as e:
-            return {
-                'parameter_name': param_config['name'],
-                'found': False,
-                'reason': f'Unexpected error: {str(e)}'
-            }
+            # Step 4: LLM call in thread — only plain strings, no SQLAlchemy
+            response_text = await loop.run_in_executor(
+                None, self._call_llm, param_config, context
+            )
+
+            return self._parse_llm_response(response_text, param_config, chunk_dicts)
+
+    # ── Store to DB ───────────────────────────────────────────────────────────
 
     def _store_extraction(self, project_id: str, param_config: Dict, extraction: Dict):
-        """Store extraction in database"""
-
         source_meta = extraction.get('source_metadata', {})
-
         all_pages = extraction.get('all_pages', [])
 
         record = ExtractedParameter(
@@ -364,7 +328,6 @@ Include ALL sources in source_numbers that contain relevant information, not jus
             notes=extraction.get('explanation')
         )
 
-        # Upsert (replace if exists)
         existing = self.db.query(ExtractedParameter).filter(
             ExtractedParameter.project_id == project_id,
             ExtractedParameter.parameter_name == param_config['name']
