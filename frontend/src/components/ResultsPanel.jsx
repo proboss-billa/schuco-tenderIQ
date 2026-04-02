@@ -4,36 +4,71 @@ import { C, F } from "@/lib/design";
 import { api } from "@/lib/api";
 import { CloseIcon, DownloadIcon } from "@/components/Icons";
 
-// ── Full list of required parameters (always shown) ──────────────────────────
-const REQUIRED_PARAMS = [
-  { key: "Wind Load",                             label: "Wind Load",                             unit: "kN/m² / Pa" },
-  { key: "Water Tightness",                       label: "Water Tightness",                       unit: "Pa / Class" },
-  { key: "Air Permeability",                      label: "Air Permeability",                      unit: "m³/h·m² / Class" },
-  { key: "Seismic Performance",                   label: "Seismic Performance",                   unit: "mm / g" },
-  { key: "Acoustic Rating",                       label: "Acoustic Rating",                       unit: "dB / Rw" },
-  { key: "U-Value",                               label: "U-Value",                               unit: "W/m²K" },
-  { key: "Glass Thickness (Openable)",            label: "Glass Thickness (Openable)",            unit: "mm" },
-  { key: "Glass Thickness (Fixed)",               label: "Glass Thickness (Fixed)",               unit: "mm" },
-  { key: "BMU Load",                              label: "BMU Load",                              unit: "kN / kg" },
-  { key: "No. of Barriers",                       label: "No. of Barriers",                       unit: "nos" },
-  { key: "Stack Height",                          label: "Stack Height",                          unit: "mm / m" },
-  { key: "Vertical Stack Movement",               label: "Vertical Stack Movement",               unit: "mm" },
-  { key: "Horizontal Movement",                   label: "Horizontal Movement",                   unit: "mm" },
-  { key: "Deflection Limit",                      label: "Deflection Limit",                      unit: "L/xxx / mm" },
-  { key: "Fire Rating",                           label: "Fire Rating",                           unit: "min / Class" },
-  { key: "Solar Factor / g-Value / SHGC",         label: "Solar Factor / g-Value / SHGC",         unit: "dimensionless / %" },
-  { key: "Visible Light Transmittance (VLT)",     label: "Visible Light Transmittance (VLT)",     unit: "%" },
-  { key: "Impact Resistance",                     label: "Impact Resistance",                     unit: "J / Class" },
-  { key: "Facade System Type",                    label: "Facade System Type",                    unit: "type" },
-  { key: "Warranty Period",                       label: "Warranty Period",                       unit: "years" },
-  { key: "Testing & Mock-up Requirements",        label: "Testing & Mock-up Requirements",        unit: "standard" },
-  { key: "Slab Edge Deflection",                  label: "Slab Edge Deflection",                  unit: "mm" },
-  { key: "Thermal Movement",                      label: "Thermal Movement",                      unit: "mm / °C" },
-  { key: "Facade Dead Load / Self Weight",        label: "Facade Dead Load / Self Weight",        unit: "kN/m²" },
-  { key: "Sustainability / Green Rating",         label: "Sustainability / Green Rating",         unit: "rating" },
-  { key: "Signage Load",                          label: "Signage Load",                          unit: "kN / kg" },
-  { key: "Blast / Explosion Resistance",          label: "Blast / Explosion Resistance",          unit: "kPa / Class" },
+// ── Parameter groups (order + category labels) ───────────────────────────────
+const PARAM_GROUPS = [
+  {
+    id: "performance",
+    label: "Performance",
+    params: [
+      { key: "Wind Load",                         label: "Wind Load",                         unit: "kN/m² / Pa" },
+      { key: "Water Tightness",                   label: "Water Tightness",                   unit: "Pa / Class" },
+      { key: "Air Permeability",                  label: "Air Permeability",                  unit: "m³/h·m² / Class" },
+      { key: "Acoustic Rating",                   label: "Acoustic Rating",                   unit: "dB / Rw" },
+      { key: "U-Value",                           label: "U-Value",                           unit: "W/m²K" },
+      { key: "Deflection Limit",                  label: "Deflection Limit",                  unit: "L/xxx / mm" },
+    ],
+  },
+  {
+    id: "glazing",
+    label: "Glazing",
+    params: [
+      { key: "Glass Thickness (Fixed)",           label: "Glass Thickness (Fixed)",           unit: "mm" },
+      { key: "Glass Thickness (Openable)",        label: "Glass Thickness (Openable)",        unit: "mm" },
+      { key: "Solar Factor / g-Value / SHGC",     label: "Solar Factor / g-Value / SHGC",     unit: "dimensionless / %" },
+      { key: "Visible Light Transmittance (VLT)", label: "Visible Light Transmittance (VLT)", unit: "%" },
+      { key: "Impact Resistance",                 label: "Impact Resistance",                 unit: "J / Class" },
+    ],
+  },
+  {
+    id: "structural",
+    label: "Structural & Movement",
+    params: [
+      { key: "Seismic Performance",               label: "Seismic Performance",               unit: "mm / g" },
+      { key: "Horizontal Movement",               label: "Horizontal Movement",               unit: "mm" },
+      { key: "Vertical Stack Movement",           label: "Vertical Stack Movement",           unit: "mm" },
+      { key: "Stack Height",                      label: "Stack Height",                      unit: "mm / m" },
+      { key: "Slab Edge Deflection",              label: "Slab Edge Deflection",              unit: "mm" },
+      { key: "Thermal Movement",                  label: "Thermal Movement",                  unit: "mm / °C" },
+      { key: "Facade Dead Load / Self Weight",    label: "Facade Dead Load / Self Weight",    unit: "kN/m²" },
+    ],
+  },
+  {
+    id: "safety",
+    label: "Safety & Fire",
+    params: [
+      { key: "Fire Rating",                       label: "Fire Rating",                       unit: "min / Class" },
+      { key: "No. of Barriers",                   label: "No. of Barriers",                   unit: "nos" },
+      { key: "Blast / Explosion Resistance",      label: "Blast / Explosion Resistance",      unit: "kPa / Class" },
+    ],
+  },
+  {
+    id: "system",
+    label: "System & Project",
+    params: [
+      { key: "Facade System Type",                label: "Facade System Type",                unit: "type" },
+      { key: "BMU Load",                          label: "BMU Load",                          unit: "kN / kg" },
+      { key: "Signage Load",                      label: "Signage Load",                      unit: "kN / kg" },
+      { key: "Warranty Period",                   label: "Warranty Period",                   unit: "years" },
+      { key: "Testing & Mock-up Requirements",    label: "Testing & Mock-up Requirements",    unit: "standard" },
+      { key: "Sustainability / Green Rating",     label: "Sustainability / Green Rating",     unit: "rating" },
+    ],
+  },
 ];
+
+// Flat list derived from groups (used for export, merge, etc.)
+const REQUIRED_PARAMS = PARAM_GROUPS.flatMap(g =>
+  g.params.map(p => ({ ...p, group: g.id, groupLabel: g.label }))
+);
 
 function confidenceColor(c) {
   return c >= 85 ? C.ok : c >= 70 ? C.warn : C.err;
@@ -46,10 +81,8 @@ function mergeWithRequired(extracted) {
     map[name] = item;
   });
 
-  // Keys already covered by the fixed required list
   const requiredKeys = new Set(REQUIRED_PARAMS.map(r => r.key));
 
-  // Build the required rows first (always shown, found or not)
   const requiredRows = REQUIRED_PARAMS.map(req => {
     const found = map[req.key];
     if (found) {
@@ -58,6 +91,8 @@ function mergeWithRequired(extracted) {
       return {
         label: req.label,
         unit: req.unit,
+        group: req.group,
+        groupLabel: req.groupLabel,
         value: found.value ?? found.value_text ?? "-",
         confidence: conf,
         notes: found.notes || null,
@@ -70,6 +105,8 @@ function mergeWithRequired(extracted) {
     return {
       label: req.label,
       unit: req.unit,
+      group: req.group,
+      groupLabel: req.groupLabel,
       value: null,
       confidence: null,
       notes: null,
@@ -77,7 +114,7 @@ function mergeWithRequired(extracted) {
     };
   });
 
-  // Append any extra parameters returned by the backend not in the required list
+  // Append any extra parameters from backend not in the required list
   const extraRows = (extracted || [])
     .filter(item => {
       const name = item.parameter_name || item.parameter || item.name || "";
@@ -91,6 +128,8 @@ function mergeWithRequired(extracted) {
       return {
         label: item.display_name || name,
         unit: item.unit || item.expected_unit || "",
+        group: "extra",
+        groupLabel: "Additional",
         value: item.value ?? item.value_text ?? "-",
         confidence: conf,
         notes: item.notes || null,
@@ -129,13 +168,13 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
     setLoading(true);
     setError("");
     setPolling(false);
-    setParams([]);  // clear stale rows from previous project immediately
+    setParams([]);
 
     let cancelled = false;
     let timer = null;
     let attempts = 0;
-    const MAX_ATTEMPTS = 80; // 80 × 3 s = 4 min max wait
-    const POLL_INTERVAL = 3000; // 3 s — results appear within 3 s of extraction finishing
+    const MAX_ATTEMPTS = 80;
+    const POLL_INTERVAL = 3000;
 
     const fetchParams = () => {
       api.getParameters(token, projectId)
@@ -144,7 +183,6 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
           const merged = mergeWithRequired(data.parameters);
           setParams(merged);
           setLoading(false);
-          // Keep polling while the backend is still processing
           const stillProcessing = data.processing_status === "processing" || data.processing_status === "uploaded";
           if (stillProcessing && attempts < MAX_ATTEMPTS) {
             attempts++;
@@ -157,8 +195,6 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
         })
         .catch(() => {
           if (cancelled) return;
-          // Transient error (network blip, Railway restart) — retry silently
-          // instead of killing the poll loop. Only give up after MAX_ATTEMPTS.
           if (attempts < MAX_ATTEMPTS) {
             attempts++;
             timer = setTimeout(fetchParams, POLL_INTERVAL);
@@ -176,12 +212,11 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
   }, [token, projectId, refreshKey]);
 
   const handleReExtract = async () => {
-    if (reExtracting) return;
+    if (reExtracting || polling) return;
     setReExtracting(true);
     setError("");
     try {
       await api.reExtract(token, projectId);
-      // Increment refreshKey → triggers useEffect which polls while status = "processing"
       setRefreshKey(k => k + 1);
     } catch (e) {
       setError(`Re-extraction failed: ${e.message}`);
@@ -243,18 +278,14 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
     const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
     const W = doc.internal.pageSize.getWidth();
 
-    // ── Dark header band ──
     doc.setFillColor(10, 14, 20);
     doc.rect(0, 0, W, 54, "F");
 
     const cx = W / 2;
-
-    // Aspect-correct sizing helpers
     const schuH = 16; const schuW = (schuecoData.w / schuecoData.h) * schuH;
     const suruH = 8;  const suruW = (sooruData.w  / sooruData.h)  * suruH;
     const teiqH = 10; const teiqW = (teiqData.w   / teiqData.h)   * teiqH;
 
-    // Row 1: TenderIQ logo + name (centered)
     const row1W = teiqW + 3 + 28;
     const row1X = cx - row1W / 2;
     doc.addImage(teiqData.data, "PNG", row1X, 6, teiqW, teiqH);
@@ -263,7 +294,6 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
     doc.setTextColor(255, 255, 255);
     doc.text("TenderIQ", row1X + teiqW + 3, 14);
 
-    // Row 2: schu (bigger) + × + suru + "Sooru.AI" (centered)
     const row2W = schuW + 6 + 5 + 6 + suruW + 4 + 16;
     const row2X = cx - row2W / 2;
     const row2Y = 22;
@@ -274,16 +304,13 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
     doc.setFontSize(9); doc.setTextColor(200, 200, 200);
     doc.text("Sooru.AI", row2X + schuW + 9 + suruW + 3, row2Y + schuH / 2 + 1.5);
 
-    // Project name subheading (centered)
     doc.setFontSize(10); doc.setFont("helvetica", "normal"); doc.setTextColor(160, 160, 160);
     doc.text(projectName || "Analysis Results", cx, 62, { align: "center" });
 
-    // Summary line (centered)
     const foundCount = params.filter(p => p.available).length;
     doc.setFontSize(9); doc.setTextColor(100, 100, 100);
     doc.text(`${foundCount} Found  ·  ${params.length - foundCount} Not Available  ·  Generated ${new Date().toLocaleDateString()}`, cx, 68, { align: "center" });
 
-    // Parameters table
     autoTable(doc, {
       startY: 73,
       head: [tableHead],
@@ -308,6 +335,25 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
 
     doc.save(`TenderIQ_${projectId}.pdf`);
   };
+
+  // ── Build grouped render list ─────────────────────────────────────────────
+  // Inject group-header sentinel objects between param rows
+  const buildGroupedList = () => {
+    if (!params.length) return [];
+    const items = [];
+    let lastGroup = null;
+    params.forEach((p, i) => {
+      const gid = p.group || "extra";
+      if (gid !== lastGroup) {
+        items.push({ __groupHeader: true, groupLabel: p.groupLabel || "Additional", groupId: gid, idx: i });
+        lastGroup = gid;
+      }
+      items.push({ ...p, __paramIdx: i });
+    });
+    return items;
+  };
+
+  const groupedItems = buildGroupedList();
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column", background: C.bg, borderLeft: isMobile ? "none" : `1px solid ${C.border}`, fontFamily: F.sans }}>
@@ -350,7 +396,7 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
         </div>
       </div>
 
-      {/* Summary bar */}
+      {/* Summary + Re-extract bar */}
       {polling && (
         <div style={{ padding: "10px 18px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
           <div style={{ display: "flex", gap: 4 }}>
@@ -358,7 +404,9 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
               <div key={i} style={{ width: 5, height: 5, borderRadius: "50%", background: C.green, animation: `pulse 1.2s ease ${i * 0.2}s infinite` }} />
             ))}
           </div>
-          <span style={{ fontSize: 11, color: C.text3 }}>Extracting parameters…</span>
+          <span style={{ fontSize: 11, color: C.text3 }}>
+            {reExtracting ? `Re-extracting ${REQUIRED_PARAMS.length} parameters…` : "Extracting parameters…"}
+          </span>
         </div>
       )}
       {!loading && !polling && params.length > 0 && (
@@ -373,16 +421,21 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
               <span style={{ color: C.text2 }}><strong style={{ color: C.text1 }}>{missing.length}</strong> Not Available</span>
             </div>
           </div>
-          {found.length === 0 && (
-            <button
-              onClick={handleReExtract}
-              disabled={reExtracting}
-              style={{ padding: "4px 10px", background: "transparent", border: `1px solid ${C.greenBorder}`, borderRadius: 6, color: C.green, cursor: reExtracting ? "default" : "pointer", fontSize: 11, fontFamily: F.sans, fontWeight: 500, opacity: reExtracting ? 0.6 : 1, transition: "all 0.15s" }}
-              onMouseEnter={e => { if (!reExtracting) e.currentTarget.style.background = C.greenSubtle; }}
-              onMouseLeave={e => { e.currentTarget.style.background = "transparent"; }}>
-              {reExtracting ? "Re-extracting…" : "Re-extract"}
-            </button>
-          )}
+          {/* Re-extract always visible — lets users refresh with new parameter catalog */}
+          <button
+            onClick={handleReExtract}
+            disabled={reExtracting || polling}
+            title="Re-run extraction to pick up all 27 parameters"
+            style={{ padding: "4px 12px", background: "transparent", border: `1px solid ${C.greenBorder}`, borderRadius: 6, color: C.green, cursor: (reExtracting || polling) ? "default" : "pointer", fontSize: 11, fontFamily: F.sans, fontWeight: 500, opacity: (reExtracting || polling) ? 0.5 : 1, transition: "all 0.15s", display: "flex", alignItems: "center", gap: 5 }}
+            onMouseEnter={e => { if (!reExtracting && !polling) e.currentTarget.style.background = C.greenSubtle; }}
+            onMouseLeave={e => { e.currentTarget.style.background = "transparent"; }}>
+            {reExtracting ? (
+              <>
+                <div style={{ width: 8, height: 8, borderRadius: "50%", background: C.green, animation: "pulse 1s ease infinite" }} />
+                Re-extracting…
+              </>
+            ) : "↺ Re-extract"}
+          </button>
         </div>
       )}
 
@@ -403,24 +456,34 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
           </div>
         )}
 
-        {!loading && !polling && params.map((r, i) => {
-          const isExpanded = expandedIdx === i;
-          const showExtraDivider = r.extra && (i === 0 || !params[i - 1].extra);
-          return (
-            <div key={i}>
-            {showExtraDivider && (
-              <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "10px 0 8px" }}>
-                <div style={{ flex: 1, height: 1, background: C.border }} />
-                <span style={{ fontSize: 10, color: C.text3, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", whiteSpace: "nowrap" }}>
-                  Additional Parameters
+        {!loading && !polling && groupedItems.map((item, idx) => {
+          // ── Group header ──
+          if (item.__groupHeader) {
+            const groupParams = params.filter(p => (p.group || "extra") === item.groupId);
+            const groupFound = groupParams.filter(p => p.available).length;
+            return (
+              <div key={`group-${item.groupId}`} style={{ display: "flex", alignItems: "center", gap: 8, margin: idx === 0 ? "4px 0 8px" : "16px 0 8px" }}>
+                <span style={{ fontSize: 10, color: C.text3, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", whiteSpace: "nowrap" }}>
+                  {item.groupLabel}
                 </span>
                 <div style={{ flex: 1, height: 1, background: C.border }} />
+                <span style={{ fontSize: 10, color: groupFound > 0 ? C.ok : C.text3, fontWeight: 600, whiteSpace: "nowrap" }}>
+                  {groupFound}/{groupParams.length}
+                </span>
               </div>
-            )}
-            <div
+            );
+          }
+
+          // ── Parameter row ──
+          const i = item.__paramIdx;
+          const r = item;
+          const isExpanded = expandedIdx === i;
+
+          return (
+            <div key={i}
               onClick={() => r.available && setExpandedIdx(isExpanded ? null : i)}
               onDoubleClick={() => r.available && setPopup(r)}
-              style={{ padding: "12px 14px", background: r.available ? C.bg1 : "transparent", borderRadius: 8, marginBottom: 6, border: `1px solid ${isExpanded ? C.greenBorder : C.border}`, opacity: r.available ? 1 : 0.5, transition: "border-color 0.15s", cursor: r.available ? "pointer" : "default" }}
+              style={{ padding: "12px 14px", background: r.available ? C.bg1 : "transparent", borderRadius: 8, marginBottom: 6, border: `1px solid ${isExpanded ? C.greenBorder : C.border}`, opacity: r.available ? 1 : 0.45, transition: "border-color 0.15s, opacity 0.15s", cursor: r.available ? "pointer" : "default" }}
               onMouseEnter={e => { if (r.available) e.currentTarget.style.borderColor = C.greenBorder; }}
               onMouseLeave={e => { if (r.available && !isExpanded) e.currentTarget.style.borderColor = C.border; }}>
               <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
@@ -469,7 +532,6 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
                   </div>
                 )}
               </div>
-            </div>
             </div>
           );
         })}

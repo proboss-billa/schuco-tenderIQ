@@ -373,34 +373,49 @@ Include ALL sources in source_numbers that contain relevant information, not jus
         source_meta = extraction.get('source_metadata', {})
         all_pages = extraction.get('all_pages', [])
 
-        record = ExtractedParameter(
-            project_id=project_id,
-            parameter_name=param_config['name'],
-            parameter_display_name=param_config['display_name'],
-            value_text=extraction.get('value'),
-            value_numeric=extraction.get('value_numeric'),
-            unit=extraction.get('unit'),
-            source_document_id=source_meta.get('document_id'),
-            source_page_number=source_meta.get('page'),
-            source_pages=json.dumps(all_pages) if all_pages else None,
-            source_section=source_meta.get('section'),
-            source_subsection=source_meta.get('subsection'),
-            source_chunk_id=source_meta.get('chunk_id'),
-            confidence_score=extraction.get('confidence', 0.0),
-            extraction_method='llm_extraction',
-            notes=extraction.get('explanation')
-        )
-
-        existing = self.db.query(ExtractedParameter).filter(
-            ExtractedParameter.project_id == project_id,
-            ExtractedParameter.parameter_name == param_config['name']
-        ).first()
-
-        if existing:
-            self.db.delete(existing)
-
-        self.db.add(record)
         try:
+            # Upsert: update existing row if present, otherwise insert a new one.
+            # This is safe under concurrent async extraction because the UniqueConstraint
+            # (project_id, parameter_name) prevents duplicate rows — we just update in place.
+            existing = self.db.query(ExtractedParameter).filter(
+                ExtractedParameter.project_id == project_id,
+                ExtractedParameter.parameter_name == param_config['name']
+            ).with_for_update().first()
+
+            if existing:
+                existing.parameter_display_name = param_config['display_name']
+                existing.value_text            = extraction.get('value')
+                existing.value_numeric         = extraction.get('value_numeric')
+                existing.unit                  = extraction.get('unit')
+                existing.source_document_id    = source_meta.get('document_id')
+                existing.source_page_number    = source_meta.get('page')
+                existing.source_pages          = json.dumps(all_pages) if all_pages else None
+                existing.source_section        = source_meta.get('section')
+                existing.source_subsection     = source_meta.get('subsection')
+                existing.source_chunk_id       = source_meta.get('chunk_id')
+                existing.confidence_score      = extraction.get('confidence', 0.0)
+                existing.extraction_method     = 'llm_extraction'
+                existing.notes                 = extraction.get('explanation')
+            else:
+                record = ExtractedParameter(
+                    project_id=project_id,
+                    parameter_name=param_config['name'],
+                    parameter_display_name=param_config['display_name'],
+                    value_text=extraction.get('value'),
+                    value_numeric=extraction.get('value_numeric'),
+                    unit=extraction.get('unit'),
+                    source_document_id=source_meta.get('document_id'),
+                    source_page_number=source_meta.get('page'),
+                    source_pages=json.dumps(all_pages) if all_pages else None,
+                    source_section=source_meta.get('section'),
+                    source_subsection=source_meta.get('subsection'),
+                    source_chunk_id=source_meta.get('chunk_id'),
+                    confidence_score=extraction.get('confidence', 0.0),
+                    extraction_method='llm_extraction',
+                    notes=extraction.get('explanation'),
+                )
+                self.db.add(record)
+
             self.db.commit()
             logger.info(f"[STORE] Saved parameter '{param_config['name']}' value='{extraction.get('value')}'")
         except Exception as e:
