@@ -274,7 +274,9 @@ Include ALL sources in source_numbers that contain relevant information, not jus
             )
 
             chunk_ids = [m['id'] for m in pinecone_results['matches']]
+            logger.info(f"[EXTRACT][{param_config['name']}] Pinecone returned {len(chunk_ids)} ids: {chunk_ids}")
             if not chunk_ids:
+                logger.info(f"[EXTRACT][{param_config['name']}] No Pinecone results → skipping")
                 return {'parameter_name': param_config['name'], 'found': False, 'reason': 'No relevant content found'}
 
             # Step 3: DB query in the main async thread — single session, no threads, safe
@@ -285,9 +287,10 @@ Include ALL sources in source_numbers that contain relevant information, not jus
                 .filter(DocumentChunk.pinecone_id.in_(chunk_ids))
                 .all()
             )
-            logger.info(f"[{param_config['name']}] Pinecone returned {len(chunk_ids)} ids, DB found {len(chunks)} chunks")
+            logger.info(f"[EXTRACT][{param_config['name']}] DB found {len(chunks)} chunks")
 
             if not chunks:
+                logger.info(f"[EXTRACT][{param_config['name']}] 0 DB chunks despite {len(chunk_ids)} Pinecone hits — project_id filter mismatch?")
                 return {'parameter_name': param_config['name'], 'found': False, 'reason': 'No chunks found in DB'}
 
             # Convert to plain dicts immediately — no SQLAlchemy objects cross thread boundary
@@ -298,11 +301,18 @@ Include ALL sources in source_numbers that contain relevant information, not jus
             context = self._build_context(chunk_dicts)
 
             # Step 4: LLM call in thread — only plain strings, no SQLAlchemy
-            response_text = await loop.run_in_executor(
-                None, self._call_llm, param_config, context
-            )
+            try:
+                response_text = await loop.run_in_executor(
+                    None, self._call_llm, param_config, context
+                )
+                logger.info(f"[EXTRACT][{param_config['name']}] LLM raw response: {response_text}")
+            except Exception as e:
+                logger.error(f"[EXTRACT][{param_config['name']}] LLM call failed: {e}")
+                return {'parameter_name': param_config['name'], 'found': False, 'reason': f'LLM error: {e}'}
 
-            return self._parse_llm_response(response_text, param_config, chunk_dicts)
+            result = self._parse_llm_response(response_text, param_config, chunk_dicts)
+            logger.info(f"[EXTRACT][{param_config['name']}] parsed result found={result.get('found')} value={result.get('value')}")
+            return result
 
     # ── Store to DB ───────────────────────────────────────────────────────────
 
@@ -337,4 +347,9 @@ Include ALL sources in source_numbers that contain relevant information, not jus
             self.db.delete(existing)
 
         self.db.add(record)
-        self.db.commit()
+        try:
+            self.db.commit()
+            logger.info(f"[STORE] Saved parameter '{param_config['name']}' value='{extraction.get('value')}'")
+        except Exception as e:
+            self.db.rollback()
+            logger.error(f"[STORE] Failed to save '{param_config['name']}': {e}")

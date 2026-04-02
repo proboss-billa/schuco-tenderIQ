@@ -195,14 +195,21 @@ async def create_project(
     }
 
 
+import logging as _logging
+_pipeline_log = _logging.getLogger("pipeline")
+
 async def _run_pipeline(project_id: uuid.UUID):
     """Background task: parse → embed → store → extract parameters."""
+    _pipeline_log.info(f"[PIPELINE] Starting for project {project_id}")
     db = SessionLocal()
     try:
         project = db.query(Project).filter(Project.project_id == project_id).first()
         if not project:
+            _pipeline_log.error(f"[PIPELINE] Project {project_id} not found")
             return
 
+        # ── Step 1: Document processing ──────────────────────────────────────
+        _pipeline_log.info(f"[PIPELINE] Step 1: Document processing")
         processor = DocumentProcessor(
             project_id=project_id,
             db_session=db,
@@ -211,25 +218,39 @@ async def _run_pipeline(project_id: uuid.UUID):
         )
         processor.process_all_documents()
 
-        # Clear stale session cache so the extractor sees chunks committed by worker threads
+        # Verify chunks were actually stored
+        from models.document_chunk import DocumentChunk
+        chunk_count = db.query(DocumentChunk).filter(
+            DocumentChunk.project_id == project_id
+        ).count()
+        _pipeline_log.info(f"[PIPELINE] Step 1 done — {chunk_count} chunks in DB")
+
         db.expire_all()
 
+        # ── Step 2: Parameter extraction ─────────────────────────────────────
+        _pipeline_log.info(f"[PIPELINE] Step 2: Parameter extraction")
         extractor = ParameterExtractor(
             pinecone_index=pinecone_index,
             embedding_client=embedding_client,
             db_session=db,
             session_factory=SessionLocal,
         )
-        await extractor.extract_all_parameters_async(
+        extractions = await extractor.extract_all_parameters_async(
             str(project_id), facade_parameters=FACADE_PARAMETERS
         )
 
+        found_count = len([e for e in extractions if e.get("found")])
+        _pipeline_log.info(f"[PIPELINE] Step 2 done — {found_count}/{len(extractions)} parameters found")
+
+        # ── Step 3: Mark complete ─────────────────────────────────────────────
         project.processing_status = "completed"
         project.processing_completed_at = datetime.now()
         db.commit()
+        _pipeline_log.info(f"[PIPELINE] Completed for project {project_id}")
 
     except Exception as e:
         traceback.print_exc()
+        _pipeline_log.error(f"[PIPELINE] FAILED for project {project_id}: {e}")
         try:
             project = db.query(Project).filter(Project.project_id == project_id).first()
             if project:
