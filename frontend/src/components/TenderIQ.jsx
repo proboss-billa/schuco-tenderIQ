@@ -43,7 +43,7 @@ function TypingIndicator({ stage }) {
 // ── Markdown-lite bold renderer ──────────────────────
 function BoldText({ text }) {
   return text.split("**").map((part, j) =>
-    j % 2 === 1 ? <strong key={j}>{part}</strong> : part
+    j % 2 === 1 ? <strong key={j}>{part}</strong> : <span key={j}>{part}</span>
   );
 }
 

@@ -227,6 +227,38 @@ async def _run_pipeline(project_id: uuid.UUID):
 
         db.expire_all()
 
+        # ── Wait for Pinecone to index the newly upserted vectors ─────────────
+        # Pinecone has eventual-consistency: vectors are not immediately queryable
+        # after upsert. Poll with a dummy query until at least one vector for this
+        # project is returned (or until a hard timeout of 30 s).
+        _pipeline_log.info(f"[PIPELINE] Waiting for Pinecone to index vectors for project {project_id}…")
+        import asyncio as _asyncio
+        _dummy_vec = [0.0] * 1536
+        deadline = 30  # max seconds to wait
+        poll_interval = 2
+        elapsed = 0
+        while elapsed < deadline:
+            await _asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+            try:
+                probe = pinecone_index.query(
+                    vector=_dummy_vec,
+                    top_k=1,
+                    filter={"project_id": str(project_id)},
+                    include_metadata=False,
+                )
+                hit_count = len(probe.get("matches", []))
+            except Exception:
+                hit_count = 0
+            _pipeline_log.info(
+                f"[PIPELINE] Pinecone probe after {elapsed}s: {hit_count} hit(s) for project"
+            )
+            if hit_count > 0:
+                _pipeline_log.info(f"[PIPELINE] Pinecone ready — proceeding to extraction")
+                break
+        else:
+            _pipeline_log.warning(f"[PIPELINE] Pinecone probe timed out after {deadline}s — proceeding anyway")
+
         # ── Step 2: Parameter extraction ─────────────────────────────────────
         _pipeline_log.info(f"[PIPELINE] Step 2: Parameter extraction")
         extractor = ParameterExtractor(
