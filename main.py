@@ -208,6 +208,7 @@ async def _run_pipeline(project_id: uuid.UUID):
             db_session=db,
             pinecone_index=pinecone_index,
             embedding_client=embedding_client,
+            session_factory=SessionLocal,
         )
         processor.process_all_documents()
 
