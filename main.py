@@ -8,7 +8,7 @@ from config.parameters import FACADE_PARAMETERS
 load_dotenv()
 from datetime import datetime
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
 import uuid
@@ -195,8 +195,55 @@ async def create_project(
     }
 
 
-@app.post("/projects/{project_id}/process")
-async def process_project(project_id: uuid.UUID, db: Session = Depends(get_db)):
+async def _run_pipeline(project_id: uuid.UUID):
+    """Background task: parse → embed → store → extract parameters."""
+    db = SessionLocal()
+    try:
+        project = db.query(Project).filter(Project.project_id == project_id).first()
+        if not project:
+            return
+
+        processor = DocumentProcessor(
+            project_id=project_id,
+            db_session=db,
+            pinecone_index=pinecone_index,
+            embedding_client=embedding_client,
+        )
+        processor.process_all_documents()
+
+        extractor = ParameterExtractor(
+            pinecone_index=pinecone_index,
+            embedding_client=embedding_client,
+            db_session=db,
+        )
+        await extractor.extract_all_parameters_async(
+            str(project_id), facade_parameters=FACADE_PARAMETERS
+        )
+
+        project.processing_status = "completed"
+        project.processing_completed_at = datetime.now()
+        db.commit()
+
+    except Exception as e:
+        traceback.print_exc()
+        try:
+            project = db.query(Project).filter(Project.project_id == project_id).first()
+            if project:
+                project.processing_status = "failed"
+                project.error_message = str(e)
+                db.commit()
+        except Exception:
+            pass
+    finally:
+        db.close()
+
+
+@app.post("/projects/{project_id}/process", status_code=202)
+async def process_project(
+    project_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
     project = db.query(Project).filter(Project.project_id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -204,48 +251,21 @@ async def process_project(project_id: uuid.UUID, db: Session = Depends(get_db)):
     if project.processing_status == "completed":
         return {"message": "Already processed", "project_id": str(project_id)}
 
+    if project.processing_status == "processing":
+        return {"message": "Already processing", "project_id": str(project_id)}
+
+    # Mark as processing immediately and return — pipeline runs in background
     project.processing_status = "processing"
     project.processing_started_at = datetime.now()
     db.commit()
 
-    try:
-        processor = DocumentProcessor(
-            project_id=project_id,
-            db_session=db,
-            pinecone_index=pinecone_index,
-            embedding_client=embedding_client,
-            # llm_client=llm_client,
-        )
-        processor.process_all_documents()
+    background_tasks.add_task(_run_pipeline, project_id)
 
-        extractor = ParameterExtractor(
-            pinecone_index=pinecone_index,
-            embedding_client=embedding_client,
-            # llm_client=llm_client,
-            db_session=db,
-        )
-        # extractions = extractor.extract_all_parameters(str(project_id))
-        extractions = await extractor.extract_all_parameters_async(str(project_id), facade_parameters=FACADE_PARAMETERS)
-
-        project.processing_status = "completed"
-        project.processing_completed_at = datetime.now()
-        db.commit()
-
-        return {
-            "project_id": str(project_id),
-            "status": "completed",
-            "parameters_extracted": len([e for e in extractions if e.get("found")]),
-            "processing_time_seconds": (
-                project.processing_completed_at - project.processing_started_at
-            ).total_seconds(),
-        }
-
-    except Exception as e:
-        traceback.print_exc()
-        project.processing_status = "failed"
-        project.error_message = str(e)
-        db.commit()
-        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
+    return {
+        "project_id": str(project_id),
+        "status": "processing",
+        "message": "Processing started. Poll /projects/{project_id} for status.",
+    }
 
 
 @app.get("/projects/{project_id}/parameters")

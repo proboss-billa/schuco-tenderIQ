@@ -221,7 +221,7 @@ Include ALL sources in source_numbers that contain relevant information, not jus
             self,
             project_id: str,
             facade_parameters: List[Dict],
-            max_concurrent: int = 5,  # tune to your LLM rate limit
+            max_concurrent: int = 10,  # tune to your LLM rate limit
     ) -> List[Dict]:
         semaphore = asyncio.Semaphore(max_concurrent)
 

@@ -10,6 +10,7 @@ from pathlib import Path
 from google import genai
 from google.genai import types
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from models.boq_item import BOQItem
 from models.document import Document
@@ -467,19 +468,29 @@ class DocumentProcessor:
             self.db.add(record)
 
     def process_all_documents(self):
-        """Main entry point - synchronous processing"""
+        """Main entry point — documents are processed in parallel."""
 
-        # Get all documents for this project
         documents = self.db.query(Document).filter(
             Document.project_id == self.project_id,
             Document.processed == False
         ).all()
 
-        for doc in documents:
+        def _process(doc):
             if doc.file_type in ['pdf_spec', 'docx_spec']:
                 self._process_specification_document(doc)
             elif doc.file_type == 'excel_boq':
                 self._process_boq_document(doc)
+
+        # Process all documents concurrently (I/O-bound: parsing + embedding API)
+        max_workers = min(len(documents), 4) if documents else 1
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_process, doc): doc for doc in documents}
+            for future in as_completed(futures):
+                doc = futures[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.error(f"Failed to process {doc.original_filename}: {e}")
 
         # After all docs processed, extract parameters
         self._extract_all_parameters()
