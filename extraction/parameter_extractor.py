@@ -165,9 +165,9 @@ Include ALL sources in source_numbers that contain relevant information, not jus
     # ── Build LLM context from plain dicts ───────────────────────────────────
 
     @staticmethod
-    def _build_context(chunk_dicts: List[Dict]) -> str:
+    def _build_context(chunk_dicts: List[Dict], max_sources: int = 3) -> str:
         parts = []
-        for i, c in enumerate(chunk_dicts[:3], 1):
+        for i, c in enumerate(chunk_dicts[:max_sources], 1):
             parts.append(
                 f"[Source {i}]\n"
                 f"Document: {c['document_name']}\n"
@@ -259,12 +259,13 @@ Include ALL sources in source_numbers that contain relevant information, not jus
         self,
         project_id: str,
         facade_parameters: List[Dict],
-        max_concurrent: int = 10,
+        max_concurrent: int = 5,
+        num_docs: int = 1,
     ) -> List[Dict]:
         semaphore = asyncio.Semaphore(max_concurrent)
 
         tasks = [
-            self._extract_single_async(project_id, param, semaphore)
+            self._extract_single_async(project_id, param, semaphore, num_docs)
             for param in facade_parameters
         ]
 
@@ -289,10 +290,15 @@ Include ALL sources in source_numbers that contain relevant information, not jus
         project_id: str,
         param_config: Dict,
         semaphore: asyncio.Semaphore,
+        num_docs: int = 1,
     ) -> Dict:
         async with semaphore:
             loop = asyncio.get_running_loop()
             query = f"{param_config['description']} {' '.join(param_config['search_keywords'])}"
+
+            # Scale top_k with number of indexed documents so we get good coverage
+            # across all documents. Cap at 30 to keep context manageable.
+            top_k = min(30, max(10, 5 * num_docs))
 
             # Step 1: Embed query in thread (network call, no SQLAlchemy)
             query_embedding = await loop.run_in_executor(
@@ -303,70 +309,79 @@ Include ALL sources in source_numbers that contain relevant information, not jus
             pinecone_results = await loop.run_in_executor(
                 None, lambda: self.pinecone.query(
                     vector=query_embedding,
-                    top_k=5,
+                    top_k=top_k,
                     filter={"project_id": project_id},
                     include_metadata=True,
                 )
             )
 
             chunk_ids = [m['id'] for m in pinecone_results['matches']]
-            logger.info(f"[EXTRACT][{param_config['name']}] Pinecone returned {len(chunk_ids)} ids: {chunk_ids}")
+            logger.info(f"[EXTRACT][{param_config['name']}] Pinecone returned {len(chunk_ids)} ids (top_k={top_k})")
             if not chunk_ids:
                 logger.info(f"[EXTRACT][{param_config['name']}] No Pinecone results → skipping")
                 return {'parameter_name': param_config['name'], 'found': False, 'reason': 'No relevant content found'}
 
-            # Step 3: DB query — load child chunks matched by Pinecone
             scores = {m['id']: m['score'] for m in pinecone_results['matches']}
-            child_chunks = (
-                self.db.query(DocumentChunk)
-                .options(joinedload(DocumentChunk.document))
-                .filter(DocumentChunk.pinecone_id.in_(chunk_ids))
-                .all()
-            )
-            logger.info(f"[EXTRACT][{param_config['name']}] DB found {len(child_chunks)} child chunks")
 
-            if not child_chunks:
-                logger.info(f"[EXTRACT][{param_config['name']}] 0 DB chunks despite {len(chunk_ids)} Pinecone hits — project_id filter mismatch?")
-                return {'parameter_name': param_config['name'], 'found': False, 'reason': 'No chunks found in DB'}
-
-            # ── Hierarchical context expansion ────────────────────────────────
-            # For each child chunk that has a parent (section-level chunk), load
-            # the parent instead.  The parent contains the FULL section text, so
-            # the LLM sees complete information rather than a mid-sentence fragment.
-            # Legacy chunks (parent_chunk_id=None) fall back to using themselves.
-            parent_ids = [
-                c.parent_chunk_id for c in child_chunks
-                if c.parent_chunk_id is not None
-            ]
-            parent_map: Dict = {}
-            if parent_ids:
-                parent_rows = (
-                    self.db.query(DocumentChunk)
+            # Step 3: DB query — use a dedicated per-task session to avoid sharing
+            # self.db across concurrent threads (SQLAlchemy sessions are not thread-safe).
+            task_session = self.session_factory() if self.session_factory else self.db
+            try:
+                child_chunks = (
+                    task_session.query(DocumentChunk)
                     .options(joinedload(DocumentChunk.document))
-                    .filter(DocumentChunk.chunk_id.in_(parent_ids))
+                    .filter(DocumentChunk.pinecone_id.in_(chunk_ids))
                     .all()
                 )
-                parent_map = {p.chunk_id: p for p in parent_rows}
-                logger.info(
-                    f"[EXTRACT][{param_config['name']}] Loaded {len(parent_map)} parent sections"
-                )
+                logger.info(f"[EXTRACT][{param_config['name']}] DB found {len(child_chunks)} child chunks")
 
-            # Build deduplicated context list — one entry per unique parent section
-            seen_parent_ids: set = set()
-            enriched: List[Dict] = []
-            for child in child_chunks:
-                score = scores.get(child.pinecone_id, 0)
-                if child.parent_chunk_id and child.parent_chunk_id in parent_map:
-                    if child.parent_chunk_id not in seen_parent_ids:
-                        seen_parent_ids.add(child.parent_chunk_id)
-                        parent = parent_map[child.parent_chunk_id]
-                        enriched.append(self._chunk_to_dict(parent, score))
-                else:
-                    # Legacy chunk or orphaned child — use as-is
-                    enriched.append(self._chunk_to_dict(child, score))
+                if not child_chunks:
+                    logger.info(f"[EXTRACT][{param_config['name']}] 0 DB chunks despite Pinecone hits — filter mismatch?")
+                    return {'parameter_name': param_config['name'], 'found': False, 'reason': 'No chunks found in DB'}
 
-            chunk_dicts = sorted(enriched, key=lambda x: x['score'], reverse=True)
-            context = self._build_context(chunk_dicts)
+                # ── Hierarchical context expansion ────────────────────────────
+                # For each child chunk that has a parent (section-level chunk), load
+                # the parent instead — it contains the FULL section text.
+                parent_ids = [
+                    c.parent_chunk_id for c in child_chunks
+                    if c.parent_chunk_id is not None
+                ]
+                parent_map: Dict = {}
+                if parent_ids:
+                    parent_rows = (
+                        task_session.query(DocumentChunk)
+                        .options(joinedload(DocumentChunk.document))
+                        .filter(DocumentChunk.chunk_id.in_(parent_ids))
+                        .all()
+                    )
+                    parent_map = {p.chunk_id: p for p in parent_rows}
+                    logger.info(
+                        f"[EXTRACT][{param_config['name']}] Loaded {len(parent_map)} parent sections"
+                    )
+
+                # Build deduplicated context list — one entry per unique parent section
+                seen_parent_ids: set = set()
+                enriched: List[Dict] = []
+                for child in child_chunks:
+                    score = scores.get(child.pinecone_id, 0)
+                    if child.parent_chunk_id and child.parent_chunk_id in parent_map:
+                        if child.parent_chunk_id not in seen_parent_ids:
+                            seen_parent_ids.add(child.parent_chunk_id)
+                            parent = parent_map[child.parent_chunk_id]
+                            enriched.append(self._chunk_to_dict(parent, score))
+                    else:
+                        enriched.append(self._chunk_to_dict(child, score))
+
+                chunk_dicts = sorted(enriched, key=lambda x: x['score'], reverse=True)
+
+            finally:
+                # Always release the per-task session — critical for connection pool health
+                if self.session_factory and task_session is not self.db:
+                    task_session.close()
+
+            # max_sources scales with number of docs so the LLM sees cross-doc context
+            max_sources = min(5, max(3, num_docs))
+            context = self._build_context(chunk_dicts, max_sources=max_sources)
 
             # Step 4: LLM call in thread — only plain strings, no SQLAlchemy
             try:
@@ -388,11 +403,12 @@ Include ALL sources in source_numbers that contain relevant information, not jus
         source_meta = extraction.get('source_metadata', {})
         all_pages = extraction.get('all_pages', [])
 
+        # Use a dedicated session for every store operation so concurrent callers
+        # (coming back from asyncio.gather) do not share the same connection.
+        store_session = self.session_factory() if self.session_factory else self.db
         try:
             # Upsert: update existing row if present, otherwise insert a new one.
-            # This is safe under concurrent async extraction because the UniqueConstraint
-            # (project_id, parameter_name) prevents duplicate rows — we just update in place.
-            existing = self.db.query(ExtractedParameter).filter(
+            existing = store_session.query(ExtractedParameter).filter(
                 ExtractedParameter.project_id == project_id,
                 ExtractedParameter.parameter_name == param_config['name']
             ).with_for_update().first()
@@ -411,7 +427,7 @@ Include ALL sources in source_numbers that contain relevant information, not jus
                 existing.confidence_score      = extraction.get('confidence', 0.0)
                 existing.extraction_method     = 'llm_extraction'
                 existing.notes                 = extraction.get('explanation')
-                existing.all_sources = json.dumps(extraction.get('all_sources', []))
+                existing.all_sources           = json.dumps(extraction.get('all_sources', []))
             else:
                 record = ExtractedParameter(
                     project_id=project_id,
@@ -431,10 +447,13 @@ Include ALL sources in source_numbers that contain relevant information, not jus
                     notes=extraction.get('explanation'),
                     all_sources=json.dumps(extraction.get('all_sources', [])),
                 )
-                self.db.add(record)
+                store_session.add(record)
 
-            self.db.commit()
+            store_session.commit()
             logger.info(f"[STORE] Saved parameter '{param_config['name']}' value='{extraction.get('value')}'")
         except Exception as e:
-            self.db.rollback()
+            store_session.rollback()
             logger.error(f"[STORE] Failed to save '{param_config['name']}': {e}")
+        finally:
+            if self.session_factory and store_session is not self.db:
+                store_session.close()

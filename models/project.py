@@ -53,3 +53,8 @@ class Project(Base):
         Text,
         nullable=True
     )
+
+    pipeline_step: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True
+    )

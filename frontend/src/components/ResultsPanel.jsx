@@ -236,6 +236,7 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
   }, []);
 
   const [polling, setPolling] = useState(false);
+  const [pipelineStep, setPipelineStep] = useState(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [reExtracting, setReExtracting] = useState(false);
 
@@ -244,6 +245,7 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
     setLoading(true);
     setError("");
     setPolling(false);
+    setPipelineStep(null);
     setParams([]);
     setDocuments([]);
 
@@ -260,6 +262,7 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
           const merged = mergeWithRequired(data.parameters);
           setParams(merged);
           setDocuments(data.documents || []);
+          setPipelineStep(data.pipeline_step || null);
           setLoading(false);
           const stillProcessing = data.processing_status === "processing" || data.processing_status === "uploaded";
           if (stillProcessing && attempts < MAX_ATTEMPTS) {
@@ -486,14 +489,14 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
 
       {/* Summary + Re-extract bar */}
       {polling && (
-        <div style={{ padding: "10px 18px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-          <div style={{ display: "flex", gap: 4 }}>
+        <div style={{ padding: "10px 18px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", gap: 8, flexShrink: 0, background: "rgba(52,211,153,0.04)" }}>
+          <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
             {[0, 1, 2].map(i => (
               <div key={i} style={{ width: 5, height: 5, borderRadius: "50%", background: C.green, animation: `pulse 1.2s ease ${i * 0.2}s infinite` }} />
             ))}
           </div>
-          <span style={{ fontSize: 11, color: C.text3 }}>
-            {reExtracting ? `Re-extracting ${REQUIRED_PARAMS.length} parameters…` : "Extracting parameters…"}
+          <span style={{ fontSize: 11, color: C.text2, flex: 1 }}>
+            {pipelineStep || (reExtracting ? `Re-extracting ${REQUIRED_PARAMS.length} parameters…` : "Processing documents…")}
           </span>
         </div>
       )}
@@ -535,17 +538,27 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
             style={{ width: "100%", padding: "8px 18px", background: "none", border: "none", display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", color: C.text2 }}>
             <span style={{ fontSize: 11, fontWeight: 600, color: C.text3, textTransform: "uppercase", letterSpacing: "0.08em" }}>
               {documents.length} Document{documents.length !== 1 ? "s" : ""}
+              {polling && <span style={{ marginLeft: 6, color: C.warn }}>• scanning</span>}
             </span>
             <span style={{ fontSize: 10, color: C.text3 }}>{showDocs ? "▲" : "▼"}</span>
           </button>
           {showDocs && (
             <div style={{ padding: "0 14px 10px" }}>
               {documents.map((doc, i) => {
-                const isOk     = doc.processing_status === "completed" || doc.processing_status === "pending";
-                const isFailed = doc.processing_status === "failed";
-                const statusColor = isFailed ? C.err : isOk ? C.ok : C.warn;
+                const st = doc.processing_status;
+                const isActive = st === "processing" || st === "indexed";
+                const isOk     = st === "completed" || st === "pending";
+                const isFailed = st === "failed";
+                const statusColor = isFailed ? C.err : isOk ? C.ok : isActive ? C.warn : C.text3;
+                const statusLabel = {
+                  "pending":    "pending",
+                  "processing": "parsing…",
+                  "indexed":    "indexed",
+                  "completed":  "done",
+                  "failed":     "failed",
+                }[st] || st || "ready";
                 return (
-                  <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", background: C.bg2, borderRadius: 7, marginBottom: 4, border: `1px solid ${C.border}` }}>
+                  <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", background: C.bg2, borderRadius: 7, marginBottom: 4, border: `1px solid ${isActive ? C.warn + "40" : C.border}` }}>
                     <span style={{ fontSize: 14, flexShrink: 0 }}>{fileIcon(doc.file_type)}</span>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 11, fontWeight: 600, color: C.text1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={doc.filename}>
@@ -553,15 +566,15 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
                       </div>
                       <div style={{ fontSize: 10, color: C.text3, marginTop: 1 }}>
                         {doc.page_count ? `${doc.page_count} pages · ` : ""}{doc.num_chunks ? `${doc.num_chunks} chunks` : ""}
-                        {doc.processing_status === "failed" && doc.processing_error && (
+                        {isFailed && doc.processing_error && (
                           <span style={{ color: C.err }}> · {doc.processing_error.slice(0, 60)}</span>
                         )}
                       </div>
                     </div>
                     <div style={{ display: "flex", alignItems: "center", gap: 3, flexShrink: 0 }}>
-                      <div style={{ width: 6, height: 6, borderRadius: "50%", background: statusColor }} />
-                      <span style={{ fontSize: 10, color: statusColor, fontWeight: 600, textTransform: "capitalize" }}>
-                        {doc.processing_status || "ready"}
+                      <div style={{ width: 6, height: 6, borderRadius: "50%", background: statusColor, animation: isActive ? "pulse 1.2s ease infinite" : "none" }} />
+                      <span style={{ fontSize: 10, color: statusColor, fontWeight: 600 }}>
+                        {statusLabel}
                       </span>
                     </div>
                   </div>
@@ -574,7 +587,7 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
 
       {/* Content */}
       <div style={{ flex: 1, overflowY: "auto", padding: "12px 14px" }}>
-        {(loading || polling) && (
+        {(loading || (polling && params.length === 0)) && (
           <div style={{ display: "flex", justifyContent: "center", alignItems: "center", height: 120 }}>
             <div style={{ display: "flex", gap: 6 }}>
               {[0, 1, 2].map(i => (
@@ -589,7 +602,7 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
           </div>
         )}
 
-        {!loading && !polling && groupedItems.map((item, idx) => {
+        {!loading && groupedItems.map((item, idx) => {
           // ── Group header ──
           if (item.__groupHeader) {
             const groupParams = params.filter(p => (p.group || "extra") === item.groupId);
@@ -630,7 +643,14 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
                       {r.value}
                     </div>
                   ) : (
-                    <div style={{ fontSize: 13, color: C.text3, fontStyle: "italic" }}>Not available in document</div>
+                    <div style={{ fontSize: 13, color: C.text3, fontStyle: "italic", display: "flex", alignItems: "center", gap: 6 }}>
+                      {polling ? (
+                        <>
+                          <div style={{ width: 6, height: 6, borderRadius: "50%", background: C.warn, animation: "pulse 1.4s ease infinite", flexShrink: 0 }} />
+                          Scanning documents…
+                        </>
+                      ) : "Not available in document"}
+                    </div>
                   )}
                   {r.available && r.section && isExpanded && (
                     <div style={{ marginTop: 5 }}>

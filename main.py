@@ -1,4 +1,5 @@
 # main.py
+import asyncio
 import os
 import traceback
 import aiofiles
@@ -125,6 +126,9 @@ def on_startup():
         conn.execute(text(
             "ALTER TABLE extracted_parameters ADD COLUMN IF NOT EXISTS all_sources TEXT"
         ))
+        conn.execute(text(
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS pipeline_step TEXT"
+        ))
         conn.commit()
 
 # ── Pinecone ──────────────────────────────────────────────────────────────────
@@ -236,8 +240,49 @@ async def create_project(
 import logging as _logging
 _pipeline_log = _logging.getLogger("pipeline")
 
+
+async def _wait_for_pinecone_doc(project_id: str, document_id: str, timeout: int = 90) -> None:
+    """Poll Pinecone until a specific document's vectors are queryable.
+
+    Uses a per-document filter so we only proceed once THIS doc's chunks are
+    visible — not just any old vector from a previous run.
+    """
+    dummy_vec = [0.0] * 1536
+    elapsed = 0
+    poll_interval = 3
+    while elapsed < timeout:
+        await asyncio.sleep(poll_interval)
+        elapsed += poll_interval
+        try:
+            probe = pinecone_index.query(
+                vector=dummy_vec,
+                top_k=1,
+                filter={"project_id": project_id, "document_id": document_id},
+                include_metadata=False,
+            )
+            if probe.get("matches"):
+                _pipeline_log.info(
+                    f"[PIPELINE] Pinecone ready for doc {document_id} after {elapsed}s"
+                )
+                return
+        except Exception as exc:
+            _pipeline_log.warning(f"[PIPELINE] Pinecone probe error: {exc}")
+    _pipeline_log.warning(
+        f"[PIPELINE] Pinecone timed out for doc {document_id} after {timeout}s — proceeding anyway"
+    )
+
+
 async def _run_pipeline(project_id: uuid.UUID):
-    """Background task: parse → embed → store → extract parameters."""
+    """Background task: per-document parse → embed → extract parameters.
+
+    Architecture
+    ────────────
+    Documents are processed ONE AT A TIME.  After each spec document is
+    parsed, chunked, and its vectors confirmed in Pinecone, ALL 27 parameters
+    are extracted (using every doc indexed so far) and upserted into the DB.
+    The frontend's 3-second polling immediately surfaces these partial results,
+    showing "Scanning document X (2/4)…" while later docs are still processing.
+    """
     _pipeline_log.info(f"[PIPELINE] Starting for project {project_id}")
     db = SessionLocal()
     try:
@@ -246,74 +291,97 @@ async def _run_pipeline(project_id: uuid.UUID):
             _pipeline_log.error(f"[PIPELINE] Project {project_id} not found")
             return
 
-        # ── Step 1: Document processing ──────────────────────────────────────
-        _pipeline_log.info(f"[PIPELINE] Step 1: Document processing")
+        all_docs = db.query(Document).filter(
+            Document.project_id == project_id,
+            Document.processed == False,
+        ).all()
+
+        spec_docs = [d for d in all_docs if d.file_type in ['pdf_spec', 'docx_spec']]
+        boq_docs  = [d for d in all_docs if d.file_type == 'excel_boq']
+        total_spec = len(spec_docs)
+        _pipeline_log.info(
+            f"[PIPELINE] {len(spec_docs)} spec docs, {len(boq_docs)} BOQ docs"
+        )
+
         processor = DocumentProcessor(
             project_id=project_id,
             db_session=db,
             pinecone_index=pinecone_index,
             embedding_client=embedding_client,
         )
-        processor.process_all_documents()
 
-        # Verify chunks were actually stored
-        from models.document_chunk import DocumentChunk
-        chunk_count = db.query(DocumentChunk).filter(
-            DocumentChunk.project_id == project_id
-        ).count()
-        _pipeline_log.info(f"[PIPELINE] Step 1 done — {chunk_count} chunks in DB")
-
-        db.expire_all()
-
-        # ── Wait for Pinecone to index the newly upserted vectors ─────────────
-        # Pinecone has eventual-consistency: vectors are not immediately queryable
-        # after upsert. Poll with a dummy query until at least one vector for this
-        # project is returned (or until a hard timeout of 30 s).
-        _pipeline_log.info(f"[PIPELINE] Waiting for Pinecone to index vectors for project {project_id}…")
-        import asyncio as _asyncio
-        _dummy_vec = [0.0] * 1536
-        deadline = 30  # max seconds to wait
-        poll_interval = 2
-        elapsed = 0
-        while elapsed < deadline:
-            await _asyncio.sleep(poll_interval)
-            elapsed += poll_interval
+        # ── Process BOQ documents (no LLM extraction needed) ─────────────────
+        for doc in boq_docs:
+            project.pipeline_step = f"Processing BOQ: {doc.original_filename}"
+            doc.processing_status = "processing"
+            db.commit()
             try:
-                probe = pinecone_index.query(
-                    vector=_dummy_vec,
-                    top_k=1,
-                    filter={"project_id": str(project_id)},
-                    include_metadata=False,
-                )
-                hit_count = len(probe.get("matches", []))
-            except Exception:
-                hit_count = 0
-            _pipeline_log.info(
-                f"[PIPELINE] Pinecone probe after {elapsed}s: {hit_count} hit(s) for project"
+                processor._process_boq_document(doc)
+                doc.processing_status = "completed"
+            except Exception as e:
+                _pipeline_log.error(f"[PIPELINE] BOQ failed {doc.original_filename}: {e}")
+                doc.processing_status = "failed"
+                doc.processing_error = str(e)[:1000]
+            db.commit()
+
+        # ── Process spec docs one-by-one; extract parameters after each ───────
+        indexed_spec_count = 0
+        for i, doc in enumerate(spec_docs, 1):
+
+            # ── A: Parse + chunk + embed ──────────────────────────────────────
+            project.pipeline_step = f"Parsing {doc.original_filename} ({i}/{total_spec})"
+            doc.processing_status = "processing"
+            db.commit()
+
+            try:
+                processor._process_specification_document(doc)
+                doc.processing_status = "indexed"
+                indexed_spec_count += 1
+                db.commit()
+            except Exception as e:
+                _pipeline_log.error(f"[PIPELINE] Parse failed {doc.original_filename}: {e}")
+                doc.processing_status = "failed"
+                doc.processing_error = str(e)[:1000]
+                db.commit()
+                continue  # skip extraction for this doc, proceed to next
+
+            # ── B: Wait for this doc's vectors to be queryable in Pinecone ────
+            project.pipeline_step = f"Indexing {doc.original_filename} ({i}/{total_spec})…"
+            db.commit()
+            await _wait_for_pinecone_doc(str(project_id), str(doc.document_id), timeout=90)
+
+            # ── C: Extract all 27 params with all indexed docs so far ─────────
+            project.pipeline_step = (
+                f"Extracting parameters from {doc.original_filename} "
+                f"({i}/{total_spec} docs scanned)…"
             )
-            if hit_count > 0:
-                _pipeline_log.info(f"[PIPELINE] Pinecone ready — proceeding to extraction")
-                break
-        else:
-            _pipeline_log.warning(f"[PIPELINE] Pinecone probe timed out after {deadline}s — proceeding anyway")
+            db.commit()
+            db.expire_all()
 
-        # ── Step 2: Parameter extraction ─────────────────────────────────────
-        _pipeline_log.info(f"[PIPELINE] Step 2: Parameter extraction")
-        extractor = ParameterExtractor(
-            pinecone_index=pinecone_index,
-            embedding_client=embedding_client,
-            db_session=db,
-            session_factory=SessionLocal,
-        )
-        extractions = await extractor.extract_all_parameters_async(
-            str(project_id), facade_parameters=FACADE_PARAMETERS
-        )
+            extractor = ParameterExtractor(
+                pinecone_index=pinecone_index,
+                embedding_client=embedding_client,
+                db_session=db,
+                session_factory=SessionLocal,
+            )
+            extractions = await extractor.extract_all_parameters_async(
+                str(project_id),
+                facade_parameters=FACADE_PARAMETERS,
+                max_concurrent=5,
+                num_docs=indexed_spec_count,
+            )
+            found_count = len([e for e in extractions if e.get("found")])
+            _pipeline_log.info(
+                f"[PIPELINE] After {i}/{total_spec} docs: "
+                f"{found_count}/{len(extractions)} params found"
+            )
 
-        found_count = len([e for e in extractions if e.get("found")])
-        _pipeline_log.info(f"[PIPELINE] Step 2 done — {found_count}/{len(extractions)} parameters found")
+            doc.processing_status = "completed"
+            db.commit()
 
-        # ── Step 3: Mark complete ─────────────────────────────────────────────
+        # ── All documents done ────────────────────────────────────────────────
         project.processing_status = "completed"
+        project.pipeline_step = None
         project.processing_completed_at = datetime.now()
         db.commit()
         _pipeline_log.info(f"[PIPELINE] Completed for project {project_id}")
@@ -325,6 +393,7 @@ async def _run_pipeline(project_id: uuid.UUID):
             project = db.query(Project).filter(Project.project_id == project_id).first()
             if project:
                 project.processing_status = "failed"
+                project.pipeline_step = None
                 project.error_message = str(e)
                 db.commit()
         except Exception:
@@ -383,7 +452,15 @@ async def re_extract_parameters(
             _proj = _db.query(Project).filter(Project.project_id == pid).first()
             if _proj:
                 _proj.processing_status = "processing"
+                _proj.pipeline_step = "Re-extracting parameters from all documents…"
                 _db.commit()
+
+            # Count already-processed spec docs so top_k / max_sources scale correctly
+            spec_count = _db.query(Document).filter(
+                Document.project_id == pid,
+                Document.file_type.in_(['pdf_spec', 'docx_spec']),
+                Document.processed == True,
+            ).count()
 
             extractor = ParameterExtractor(
                 pinecone_index=pinecone_index,
@@ -392,7 +469,10 @@ async def re_extract_parameters(
                 session_factory=SessionLocal,
             )
             extractions = await extractor.extract_all_parameters_async(
-                str(pid), facade_parameters=FACADE_PARAMETERS
+                str(pid),
+                facade_parameters=FACADE_PARAMETERS,
+                max_concurrent=5,
+                num_docs=max(1, spec_count),
             )
             found_count = len([e for e in extractions if e.get("found")])
             _pipeline_log.info(f"[RE-EXTRACT] Done — {found_count}/{len(extractions)} parameters found")
@@ -401,6 +481,7 @@ async def re_extract_parameters(
             _proj = _db.query(Project).filter(Project.project_id == pid).first()
             if _proj:
                 _proj.processing_status = "completed"
+                _proj.pipeline_step = None
                 _db.commit()
         except Exception as e:
             import traceback as _tb
@@ -410,6 +491,7 @@ async def re_extract_parameters(
                 _proj = _db.query(Project).filter(Project.project_id == pid).first()
                 if _proj:
                     _proj.processing_status = "failed"
+                    _proj.pipeline_step = None
                     _db.commit()
             except Exception:
                 pass
@@ -497,6 +579,7 @@ async def get_extracted_parameters(project_id: uuid.UUID, db: Session = Depends(
     return {
         "project_id": str(project_id),
         "processing_status": project.processing_status,
+        "pipeline_step": getattr(project, 'pipeline_step', None),
         "parameters": results,
         "total_extracted": len(results),
         "documents": documents_info,
