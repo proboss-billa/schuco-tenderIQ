@@ -86,11 +86,11 @@ export default function TenderIQ() {
         setScreen("main");
         api.listProjects(data.access_token).then(projects => {
           if (Array.isArray(projects) && projects.length > 0) {
-            setChats(projects);
-            const latest = projects[0];
-            setCurrentProjectId(latest.id);
-            setCurrentProjectName(latest.name);
-            api.getChatHistory(data.access_token, latest.id).then(msgs => { if (Array.isArray(msgs)) setMsgs(msgs); });
+            setChats(projects.map(p => ({
+              id: p.project_id || p.id,
+              title: p.project_name || p.name || "Untitled",
+              date: p.created_at ? new Date(p.created_at).toLocaleDateString() : "",
+            })));
           }
         });
       })
