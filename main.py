@@ -14,7 +14,7 @@ from typing import List
 import uuid
 import shutil
 from pathlib import Path
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
 
 from pinecone import Pinecone
@@ -83,6 +83,12 @@ def seed_default_user():
 @app.on_event("startup")
 def on_startup():
     Base.metadata.create_all(bind=engine)
+    # Add columns introduced after initial schema creation
+    with engine.connect() as conn:
+        conn.execute(text(
+            "ALTER TABLE extracted_parameters ADD COLUMN IF NOT EXISTS source_pages TEXT"
+        ))
+        conn.commit()
 
 # ── Pinecone ──────────────────────────────────────────────────────────────────
 def initialize_pinecone():
