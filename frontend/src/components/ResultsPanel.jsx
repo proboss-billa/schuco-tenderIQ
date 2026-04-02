@@ -89,7 +89,8 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
     let cancelled = false;
     let timer = null;
     let attempts = 0;
-    const MAX_ATTEMPTS = 24; // 24 × 10 s = 4 min max wait
+    const MAX_ATTEMPTS = 80; // 80 × 3 s = 4 min max wait
+    const POLL_INTERVAL = 3000; // 3 s — results appear within 3 s of extraction finishing
 
     const fetchParams = () => {
       api.getParameters(token, projectId)
@@ -103,18 +104,25 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
           if (stillProcessing && attempts < MAX_ATTEMPTS) {
             attempts++;
             setPolling(true);
-            timer = setTimeout(fetchParams, 10000);
+            timer = setTimeout(fetchParams, POLL_INTERVAL);
           } else {
             setPolling(false);
             setReExtracting(false);
           }
         })
-        .catch(e => {
+        .catch(() => {
           if (cancelled) return;
-          setError(e.message);
-          setLoading(false);
-          setPolling(false);
-          setReExtracting(false);
+          // Transient error (network blip, Railway restart) — retry silently
+          // instead of killing the poll loop. Only give up after MAX_ATTEMPTS.
+          if (attempts < MAX_ATTEMPTS) {
+            attempts++;
+            timer = setTimeout(fetchParams, POLL_INTERVAL);
+          } else {
+            setError("Could not load parameters. Please refresh.");
+            setLoading(false);
+            setPolling(false);
+            setReExtracting(false);
+          }
         });
     };
 
