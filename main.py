@@ -88,7 +88,7 @@ def on_startup():
 def initialize_pinecone():
     api_key = os.getenv("PINECONE_API_KEY")
     index_name = os.getenv("PINECONE_INDEX", "tender-poc")
-    target_dim = 1024
+    target_dim = 1536
 
     pc = Pinecone(api_key=api_key)
     existing = [i.name for i in pc.list_indexes()]

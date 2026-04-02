@@ -1,15 +1,28 @@
 import os
-import voyageai
+import requests
 
 
 class GoogleEmbedding:
     def __init__(self):
-        self.client = voyageai.Client(api_key=os.getenv("VOYAGE_API_KEY"))
-        self.model = "voyage-3"
+        self.api_key = os.getenv("GEMINI_API_KEY")
+        self.model = "gemini-embedding-2-preview"
+        self.url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:embedContent"
 
     def embed(self, texts):
         if isinstance(texts, str):
             texts = [texts]
 
-        result = self.client.embed(texts, model=self.model)
-        return result.embeddings
+        embeddings = []
+        for text in texts:
+            resp = requests.post(
+                self.url,
+                params={"key": self.api_key},
+                json={
+                    "model": f"models/{self.model}",
+                    "content": {"parts": [{"text": text}]},
+                    "outputDimensionality": 1536,
+                },
+            )
+            resp.raise_for_status()
+            embeddings.append(resp.json()["embedding"]["values"])
+        return embeddings
