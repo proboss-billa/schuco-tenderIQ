@@ -75,14 +75,45 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
     return () => document.removeEventListener("mousedown", handler);
   }, []);
 
+  const [polling, setPolling] = useState(false);
+
   useEffect(() => {
     if (!projectId) return;
     setLoading(true);
     setError("");
-    api.getParameters(token, projectId)
-      .then(data => setParams(mergeWithRequired(data.parameters)))
-      .catch(e => setError(e.message))
-      .finally(() => setLoading(false));
+    setPolling(false);
+
+    let cancelled = false;
+    let timer = null;
+    let attempts = 0;
+    const MAX_ATTEMPTS = 24; // 24 × 10 s = 4 min max wait
+
+    const fetchParams = () => {
+      api.getParameters(token, projectId)
+        .then(data => {
+          if (cancelled) return;
+          const merged = mergeWithRequired(data.parameters);
+          setParams(merged);
+          setLoading(false);
+          // If nothing extracted yet, keep polling until extraction finishes
+          if (data.total_extracted === 0 && attempts < MAX_ATTEMPTS) {
+            attempts++;
+            setPolling(true);
+            timer = setTimeout(fetchParams, 10000);
+          } else {
+            setPolling(false);
+          }
+        })
+        .catch(e => {
+          if (cancelled) return;
+          setError(e.message);
+          setLoading(false);
+          setPolling(false);
+        });
+    };
+
+    fetchParams();
+    return () => { cancelled = true; clearTimeout(timer); };
   }, [token, projectId]);
 
   const found = params.filter(p => p.available);
