@@ -508,13 +508,14 @@ class DocumentProcessor:
         self.db.commit()
 
     def _process_boq_document(self, document):
-        """Process Excel BOQ"""
+        """Process Excel BOQ — store items in PostgreSQL and embed into Pinecone."""
         try:
             boq_items = self._parse_excel_boq(document.file_path)
         except Exception as e:
             logger.warning(f"Skipping BOQ parsing for {document.original_filename}: {e}")
             boq_items = []
 
+        valid_items = []
         for item in boq_items:
             try:
                 boq_record = BOQItem(
@@ -523,9 +524,68 @@ class DocumentProcessor:
                     **item
                 )
                 self.db.add(boq_record)
+                valid_items.append(item)
             except Exception as e:
                 logger.warning(f"Skipping BOQ item: {e}")
                 continue
+
+        # Build a rich text representation for each item and embed into Pinecone
+        if valid_items:
+            texts = []
+            for item in valid_items:
+                parts = []
+                if item.get("item_number"):
+                    parts.append(f"Item: {item['item_number']}")
+                if item.get("description"):
+                    parts.append(f"Description: {item['description']}")
+                if item.get("quantity") is not None:
+                    parts.append(f"Quantity: {item['quantity']} {item.get('unit') or ''}")
+                if item.get("rate") is not None:
+                    parts.append(f"Rate: {item['rate']}")
+                if item.get("amount") is not None:
+                    parts.append(f"Amount: {item['amount']}")
+                if item.get("category"):
+                    parts.append(f"Category: {item['category']}")
+                if item.get("sub_category"):
+                    parts.append(f"Sub-category: {item['sub_category']}")
+                texts.append(" | ".join(parts))
+
+            embeddings = self._generate_embeddings(texts)
+
+            pinecone_vectors = []
+            for chunk_index, (item, text, embedding) in enumerate(zip(valid_items, texts, embeddings)):
+                vector_id = f"{document.document_id}_boq_{chunk_index}"
+
+                db_chunk = DocumentChunk(
+                    document_id=document.document_id,
+                    project_id=self.project_id,
+                    chunk_index=chunk_index,
+                    chunk_text=text,
+                    page_number=None,
+                    section_title=item.get("category"),
+                    subsection_title=item.get("sub_category"),
+                    pinecone_id=vector_id,
+                )
+                self.db.add(db_chunk)
+
+                pinecone_vectors.append({
+                    "id": vector_id,
+                    "values": embedding,
+                    "metadata": {
+                        "document_id": str(document.document_id),
+                        "project_id": str(self.project_id),
+                        "file_type": document.file_type,
+                        "section": item.get("category") or "",
+                        "subsection": item.get("sub_category") or "",
+                        "page_start": 0,
+                        "is_table": False,
+                        "text_preview": text[:200],
+                    },
+                })
+
+            PINECONE_BATCH = 100
+            for start in range(0, len(pinecone_vectors), PINECONE_BATCH):
+                self.pinecone.upsert(vectors=pinecone_vectors[start: start + PINECONE_BATCH])
 
         document.processed = True
         self.db.commit()
