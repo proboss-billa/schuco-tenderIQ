@@ -10,7 +10,6 @@ from pathlib import Path
 from google import genai
 from google.genai import types
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from models.boq_item import BOQItem
 from models.document import Document
@@ -38,14 +37,11 @@ PARAM_BATCH_SIZE = 1800  # chunks sent per LLM parameter-extraction call
 class DocumentProcessor:
     """Main processing orchestrator"""
 
-    def __init__(self, project_id: uuid.UUID, db_session, pinecone_index, embedding_client, session_factory=None):
+    def __init__(self, project_id: uuid.UUID, db_session, pinecone_index, embedding_client):
         self.project_id = project_id
         self.db = db_session
         self.pinecone = pinecone_index
         self.embedder = embedding_client
-        # session_factory is used to create isolated sessions per thread
-        self.session_factory = session_factory
-        # self.llm = llm_client
         self.gemini_llm_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 
@@ -470,57 +466,22 @@ class DocumentProcessor:
             self.db.add(record)
 
     def process_all_documents(self):
-        """Main entry point — documents are processed in parallel.
+        """Process all project documents sequentially then extract parameters."""
 
-        Each worker thread gets its own DB session to avoid SQLAlchemy
-        session thread-safety issues.
-        """
+        documents = self.db.query(Document).filter(
+            Document.project_id == self.project_id,
+            Document.processed == False
+        ).all()
 
-        doc_ids = [
-            row[0] for row in self.db.query(Document.document_id).filter(
-                Document.project_id == self.project_id,
-                Document.processed == False
-            ).all()
-        ]
-
-        def _process(doc_id):
-            # Each thread gets its own isolated session
-            if self.session_factory:
-                thread_db = self.session_factory()
-            else:
-                thread_db = self.db  # fallback: single session (not parallel-safe)
-
+        for doc in documents:
             try:
-                doc = thread_db.query(Document).filter(
-                    Document.document_id == doc_id
-                ).first()
-                if not doc:
-                    return
+                if doc.file_type in ['pdf_spec', 'docx_spec']:
+                    self._process_specification_document(doc)
+                elif doc.file_type == 'excel_boq':
+                    self._process_boq_document(doc)
+            except Exception as e:
+                logger.error(f"Failed to process {doc.original_filename}: {e}")
 
-                # Temporarily swap session so helpers use the thread-local one
-                original_db = self.db
-                self.db = thread_db
-                try:
-                    if doc.file_type in ['pdf_spec', 'docx_spec']:
-                        self._process_specification_document(doc)
-                    elif doc.file_type == 'excel_boq':
-                        self._process_boq_document(doc)
-                finally:
-                    self.db = original_db
-            finally:
-                if self.session_factory:
-                    thread_db.close()
-
-        max_workers = min(len(doc_ids), 4) if doc_ids else 1
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(_process, doc_id): doc_id for doc_id in doc_ids}
-            for future in as_completed(futures):
-                try:
-                    future.result()
-                except Exception as e:
-                    logger.error(f"Failed to process document {futures[future]}: {e}")
-
-        # After all docs processed, extract parameters
         self._extract_all_parameters()
 
     def _process_specification_document(self, document):
