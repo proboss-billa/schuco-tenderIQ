@@ -200,6 +200,9 @@ class DocumentProcessor:
             # Reset buffer, keeping overlap
             word_buffer.clear()
             word_buffer.extend(overlap_words)
+            # Overlap words come from the end of the flushed chunk — advance page_start
+            if overlap_words:
+                meta_buffer["page_start"] = meta_buffer["page_end"]
 
         for block in parsed_content:
             # ── skip pure headings (they're captured in section/subsection) ──
@@ -250,6 +253,8 @@ class DocumentProcessor:
                 chunk_index += 1
                 # Slide window forward (keep overlap)
                 word_buffer[:] = word_buffer[CHUNK_SIZE - CHUNK_OVERLAP:]
+                # Overlap content is from the current page — advance page_start
+                meta_buffer["page_start"] = meta_buffer["page_end"]
 
         flush_buffer(final=True)
         return chunks
