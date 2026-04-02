@@ -6,10 +6,8 @@ from models.document_chunk import DocumentChunk
 from models.extracted_parameter import ExtractedParameter
 
 import os
-from google import genai
-from google.genai import types
+import anthropic
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-from google.genai.errors import ClientError
 
 from processing.document_processor import logger
 
@@ -24,12 +22,12 @@ class ParameterExtractor:
         self.embedder = embedding_client
         # self.llm = llm_client
         self.db = db_session
-        self.gemini = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+        self.claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
     @retry(
         stop=stop_after_attempt(5),
         wait=wait_exponential(multiplier=1, min=8, max=60),
-        retry=retry_if_exception_type(ClientError)
+        retry=retry_if_exception_type(anthropic.RateLimitError)
     )
     def extract_facade_parameter(self, param_config, context):
         # System instructions keep the "Analyst" persona consistent
@@ -61,25 +59,19 @@ Set "found" to true only if the parameter is clearly present in the context.
 """
         logger.info(prompt)
         try:
-            response = self.gemini.models.generate_content(
-                model="gemini-2.5-flash",
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instr,
-                    # Forces valid JSON and removes the need for "No prose" in prompt
-                    response_mime_type="application/json",
-                    temperature=0.1,
-                ),
-                contents=prompt
+            response = self.claude.messages.create(
+                model="claude-opus-4-6",
+                max_tokens=1024,
+                temperature=0.1,
+                system=system_instr,
+                messages=[{"role": "user", "content": prompt}],
             )
-            logger.info(response.text)
+            result_text = response.content[0].text
+            logger.info(result_text)
+            return result_text
 
-            # Gemini returns the string in .text; you can use json.loads() here if needed
-            return response.text
-
-        except ClientError as e:
-            if e.status_code == 429:
-                logger.info(f"Rate limit hit for {param_config['display_name']}. Retrying...")
-                raise e
+        except anthropic.RateLimitError as e:
+            logger.info(f"Rate limit hit for {param_config['display_name']}. Retrying...")
             raise e
 
     def extract_all_parameters(self, project_id: str) -> List[Dict]:
@@ -260,8 +252,6 @@ Set "found" to true only if the parameter is clearly present in the context.
         context = "\n\n".join(context_parts)
 
         try:
-            # 1. Call the updated extraction method (using gemini-3.1-flash-preview)
-            # Note: In 2026, 'gemini-3.1-flash-preview' is the current performance standard.
             response_text = self.extract_facade_parameter(param_config, context)
 
             # 2. Parse JSON response
@@ -269,7 +259,6 @@ Set "found" to true only if the parameter is clearly present in the context.
             result = json.loads(response_text)
 
             # 3. Add source metadata logic
-            # Gemini is usually better at returning integers for 'source_number' than Claude
             if result.get('found') and result.get('source_number'):
                 try:
                     # Ensure it's an int and adjust for 0-based indexing
@@ -297,7 +286,7 @@ Set "found" to true only if the parameter is clearly present in the context.
             return {
                 'parameter_name': param_config['name'],
                 'found': False,
-                'reason': 'Gemini JSON parsing failed'
+                'reason': 'Claude JSON parsing failed'
             }
         except Exception as e:
             return {

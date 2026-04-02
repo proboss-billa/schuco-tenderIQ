@@ -31,8 +31,7 @@ from models.user import User
 from processing.document_processor import DocumentProcessor
 from google_embedding import GoogleEmbedding
 
-from google import genai
-from google.genai import types
+import anthropic
 
 app = FastAPI(title="Tender Analysis POC API", debug=True)
 
@@ -64,6 +63,22 @@ def get_db():
     finally:
         db.close()
 
+
+@app.on_event("startup")
+def seed_default_user():
+    """Create default user abc@sooru.ai on startup if it doesn't exist."""
+    db = SessionLocal()
+    try:
+        existing = db.query(User).filter(User.email == "abc@sooru.ai").first()
+        if not existing:
+            user = User(user_id=uuid.uuid4(), email="abc@sooru.ai", password_hash=hash_password("12345678"))
+            db.add(user)
+            db.commit()
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()
+
 @app.on_event("startup")
 def on_startup():
     Base.metadata.create_all(bind=engine)
@@ -72,7 +87,7 @@ def on_startup():
 def initialize_pinecone():
     api_key = os.getenv("PINECONE_API_KEY")
     index_name = os.getenv("PINECONE_INDEX", "tender-poc")
-    target_dim = 768
+    target_dim = 1024
 
     pc = Pinecone(api_key=api_key)
     existing = [i.name for i in pc.list_indexes()]
@@ -97,8 +112,7 @@ def initialize_pinecone():
 # ── Shared service clients (stateless, safe to share) ────────────────────────
 pinecone_index = initialize_pinecone()
 embedding_client = GoogleEmbedding()
-# llm_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+claude_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def classify_file_type(filename: str) -> str:
@@ -283,17 +297,15 @@ async def adhoc_query(project_id: uuid.UUID, query: str = Form(...), db: Session
 - Always cite the page number (e.g. "Page 12") and document name where the information was found.
 - If the answer isn't present, say "Information not found in documents"."""
 
-    response = gemini_client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=f"Question: {query}\n\nContext:\n{context}",
-        config=types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            max_output_tokens=500,
-            temperature=0.1,
-        ),
+    response = claude_client.messages.create(
+        model="claude-opus-4-6",
+        max_tokens=500,
+        temperature=0.1,
+        system=system_prompt,
+        messages=[{"role": "user", "content": f"Question: {query}\n\nContext:\n{context}"}],
     )
 
-    answer = response.text
+    answer = response.content[0].text
 
     query_log = QueryLog(
         project_id=project_id,

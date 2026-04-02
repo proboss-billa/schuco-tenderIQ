@@ -78,6 +78,25 @@ export default function TenderIQ() {
   const chatEnd = useRef(null);
   const dragState = useRef(null);
 
+  // Auto-login with default credentials
+  useEffect(() => {
+    api.login("abc@sooru.ai", "12345678")
+      .then(data => {
+        setToken(data.access_token);
+        setScreen("main");
+        api.listProjects(data.access_token).then(projects => {
+          if (Array.isArray(projects) && projects.length > 0) {
+            setChats(projects);
+            const latest = projects[0];
+            setCurrentProjectId(latest.id);
+            setCurrentProjectName(latest.name);
+            api.getChatHistory(data.access_token, latest.id).then(msgs => { if (Array.isArray(msgs)) setMsgs(msgs); });
+          }
+        });
+      })
+      .catch(() => {}); // fall through to login screen if it fails
+  }, []);
+
   // Responsive
   useEffect(() => {
     const c = () => setIsMob(window.innerWidth < 768);
