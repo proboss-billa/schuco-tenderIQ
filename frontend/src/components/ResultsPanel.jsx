@@ -95,8 +95,9 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
           const merged = mergeWithRequired(data.parameters);
           setParams(merged);
           setLoading(false);
-          // If nothing extracted yet, keep polling until extraction finishes
-          if (data.total_extracted === 0 && attempts < MAX_ATTEMPTS) {
+          // Keep polling while the backend is still processing
+          const stillProcessing = data.processing_status === "processing" || data.processing_status === "uploading";
+          if (stillProcessing && attempts < MAX_ATTEMPTS) {
             attempts++;
             setPolling(true);
             timer = setTimeout(fetchParams, 10000);
@@ -278,7 +279,17 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
       </div>
 
       {/* Summary bar */}
-      {!loading && params.length > 0 && (
+      {polling && (
+        <div style={{ padding: "10px 18px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+          <div style={{ display: "flex", gap: 4 }}>
+            {[0, 1, 2].map(i => (
+              <div key={i} style={{ width: 5, height: 5, borderRadius: "50%", background: C.green, animation: `pulse 1.2s ease ${i * 0.2}s infinite` }} />
+            ))}
+          </div>
+          <span style={{ fontSize: 11, color: C.text3 }}>Extracting parameters…</span>
+        </div>
+      )}
+      {!loading && !polling && params.length > 0 && (
         <div style={{ padding: "10px 18px", borderBottom: `1px solid ${C.border}`, display: "flex", gap: 16, flexShrink: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
             <div style={{ width: 8, height: 8, borderRadius: "50%", background: C.ok }} />

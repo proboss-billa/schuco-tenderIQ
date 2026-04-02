@@ -369,6 +369,10 @@ async def re_extract_parameters(
 
 @app.get("/projects/{project_id}/parameters")
 async def get_extracted_parameters(project_id: uuid.UUID, db: Session = Depends(get_db)):
+    project = db.query(Project).filter(Project.project_id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
     parameters = db.query(ExtractedParameter).filter(
         ExtractedParameter.project_id == project_id
     ).all()
@@ -401,6 +405,7 @@ async def get_extracted_parameters(project_id: uuid.UUID, db: Session = Depends(
 
     return {
         "project_id": str(project_id),
+        "processing_status": project.processing_status,
         "parameters": results,
         "total_extracted": len(results),
     }
