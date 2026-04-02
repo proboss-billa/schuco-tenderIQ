@@ -76,6 +76,8 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
   }, []);
 
   const [polling, setPolling] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [reExtracting, setReExtracting] = useState(false);
 
   useEffect(() => {
     if (!projectId) return;
@@ -103,6 +105,7 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
             timer = setTimeout(fetchParams, 10000);
           } else {
             setPolling(false);
+            setReExtracting(false);
           }
         })
         .catch(e => {
@@ -110,12 +113,27 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
           setError(e.message);
           setLoading(false);
           setPolling(false);
+          setReExtracting(false);
         });
     };
 
     fetchParams();
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [token, projectId]);
+  }, [token, projectId, refreshKey]);
+
+  const handleReExtract = async () => {
+    if (reExtracting) return;
+    setReExtracting(true);
+    setError("");
+    try {
+      await api.reExtract(token, projectId);
+      // Increment refreshKey → triggers useEffect which polls while status = "processing"
+      setRefreshKey(k => k + 1);
+    } catch (e) {
+      setError(`Re-extraction failed: ${e.message}`);
+      setReExtracting(false);
+    }
+  };
 
   const found = params.filter(p => p.available);
   const missing = params.filter(p => !p.available);
@@ -290,15 +308,27 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
         </div>
       )}
       {!loading && !polling && params.length > 0 && (
-        <div style={{ padding: "10px 18px", borderBottom: `1px solid ${C.border}`, display: "flex", gap: 16, flexShrink: 0 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
-            <div style={{ width: 8, height: 8, borderRadius: "50%", background: C.ok }} />
-            <span style={{ color: C.text2 }}><strong style={{ color: C.text1 }}>{found.length}</strong> Found</span>
+        <div style={{ padding: "10px 18px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, flexShrink: 0 }}>
+          <div style={{ display: "flex", gap: 16 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+              <div style={{ width: 8, height: 8, borderRadius: "50%", background: C.ok }} />
+              <span style={{ color: C.text2 }}><strong style={{ color: C.text1 }}>{found.length}</strong> Found</span>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+              <div style={{ width: 8, height: 8, borderRadius: "50%", background: C.text3 }} />
+              <span style={{ color: C.text2 }}><strong style={{ color: C.text1 }}>{missing.length}</strong> Not Available</span>
+            </div>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
-            <div style={{ width: 8, height: 8, borderRadius: "50%", background: C.text3 }} />
-            <span style={{ color: C.text2 }}><strong style={{ color: C.text1 }}>{missing.length}</strong> Not Available</span>
-          </div>
+          {found.length === 0 && (
+            <button
+              onClick={handleReExtract}
+              disabled={reExtracting}
+              style={{ padding: "4px 10px", background: "transparent", border: `1px solid ${C.greenBorder}`, borderRadius: 6, color: C.green, cursor: reExtracting ? "default" : "pointer", fontSize: 11, fontFamily: F.sans, fontWeight: 500, opacity: reExtracting ? 0.6 : 1, transition: "all 0.15s" }}
+              onMouseEnter={e => { if (!reExtracting) e.currentTarget.style.background = C.greenSubtle; }}
+              onMouseLeave={e => { e.currentTarget.style.background = "transparent"; }}>
+              {reExtracting ? "Re-extracting…" : "Re-extract"}
+            </button>
+          )}
         </div>
       )}
 

@@ -55,6 +55,15 @@ export const api = {
     return res.json();
   },
 
+  async reExtract(token, projectId) {
+    const res = await fetch(`${BASE}/projects/${projectId}/re-extract`, {
+      method: "POST",
+      headers: authHeaders(token),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+  },
+
   async query(token, projectId, question) {
     const form = new FormData();
     form.append("query", question);

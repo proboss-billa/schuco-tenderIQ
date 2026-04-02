@@ -341,6 +341,12 @@ async def re_extract_parameters(
         _pipeline_log.info(f"[RE-EXTRACT] Starting for project {pid}")
         _db = SessionLocal()
         try:
+            # Mark as processing so the frontend polling detects it
+            _proj = _db.query(Project).filter(Project.project_id == pid).first()
+            if _proj:
+                _proj.processing_status = "processing"
+                _db.commit()
+
             extractor = ParameterExtractor(
                 pinecone_index=pinecone_index,
                 embedding_client=embedding_client,
@@ -352,10 +358,23 @@ async def re_extract_parameters(
             )
             found_count = len([e for e in extractions if e.get("found")])
             _pipeline_log.info(f"[RE-EXTRACT] Done — {found_count}/{len(extractions)} parameters found")
+
+            # Mark complete so polling stops
+            _proj = _db.query(Project).filter(Project.project_id == pid).first()
+            if _proj:
+                _proj.processing_status = "completed"
+                _db.commit()
         except Exception as e:
             import traceback as _tb
             _tb.print_exc()
             _pipeline_log.error(f"[RE-EXTRACT] FAILED for project {pid}: {e}")
+            try:
+                _proj = _db.query(Project).filter(Project.project_id == pid).first()
+                if _proj:
+                    _proj.processing_status = "failed"
+                    _db.commit()
+            except Exception:
+                pass
         finally:
             _db.close()
 
