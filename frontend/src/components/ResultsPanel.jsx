@@ -96,7 +96,7 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
           setParams(merged);
           setLoading(false);
           // Keep polling while the backend is still processing
-          const stillProcessing = data.processing_status === "processing" || data.processing_status === "uploading";
+          const stillProcessing = data.processing_status === "processing" || data.processing_status === "uploaded";
           if (stillProcessing && attempts < MAX_ATTEMPTS) {
             attempts++;
             setPolling(true);
