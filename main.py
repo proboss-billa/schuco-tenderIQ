@@ -299,7 +299,7 @@ async def adhoc_query(project_id: uuid.UUID, query: str = Form(...), db: Session
 - If the answer isn't present, say "Information not found in documents"."""
 
     response = gemini_client.models.generate_content(
-        model="gemini-3.1-flash-preview",
+        model="gemini-3-flash-preview",
         contents=f"Question: {query}\n\nContext:\n{context}",
         config=types.GenerateContentConfig(
             system_instruction=system_prompt,

@@ -62,7 +62,7 @@ Set "found" to true only if the parameter is clearly present in the context.
         logger.info(prompt)
         try:
             response = self.gemini.models.generate_content(
-                model="gemini-3.1-flash-preview",
+                model="gemini-3-flash-preview",
                 config=types.GenerateContentConfig(
                     system_instruction=system_instr,
                     response_mime_type="application/json",
