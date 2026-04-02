@@ -334,7 +334,7 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
 
       {/* Content */}
       <div style={{ flex: 1, overflowY: "auto", padding: "12px 14px" }}>
-        {loading && (
+        {(loading || polling) && (
           <div style={{ display: "flex", justifyContent: "center", alignItems: "center", height: 120 }}>
             <div style={{ display: "flex", gap: 6 }}>
               {[0, 1, 2].map(i => (
@@ -349,7 +349,7 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
           </div>
         )}
 
-        {!loading && params.map((r, i) => {
+        {!loading && !polling && params.map((r, i) => {
           const isExpanded = expandedIdx === i;
           return (
             <div key={i}
