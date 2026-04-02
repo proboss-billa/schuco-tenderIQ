@@ -41,6 +41,7 @@ class ExtractedParameter(Base):
     )
 
     source_page_number: Mapped[int | None] = mapped_column(Integer)
+    source_pages: Mapped[str | None] = mapped_column(Text)  # JSON array of all page numbers
     source_section: Mapped[str | None] = mapped_column(Text)
     source_subsection: Mapped[str | None] = mapped_column(Text)
 

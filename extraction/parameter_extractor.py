@@ -64,13 +64,14 @@ Return a JSON object with EXACTLY these fields:
   "value": "extracted value as string (summarise all relevant sub-values), or null if not found",
   "value_numeric": numeric value as a number or null (null for composite/text values),
   "unit": "unit string or null",
-  "source_number": 1, 2, or 3 (which source contained the value),
+  "source_numbers": [list of source numbers 1/2/3 that contain relevant information, e.g. [1, 2]],
   "confidence": float between 0.0 and 1.0,
   "explanation": "brief explanation of where/how you found it"
 }}
 
 Set "found" to true if ANY relevant information for this parameter is present in the context, even if partial.
 Set "found" to false only if the parameter is completely absent from the context.
+Include ALL sources in source_numbers that contain relevant information, not just the primary one.
 """
         logger.info(prompt)
         try:
@@ -276,26 +277,42 @@ Set "found" to false only if the parameter is completely absent from the context
             # Gemini with response_mime_type="application/json" returns a clean string
             result = json.loads(response_text)
 
-            # 3. Add source metadata logic
-            if result.get('found') and result.get('source_number'):
+            # 3. Add source metadata — handle both source_numbers (array) and legacy source_number
+            if result.get('found'):
+                # Normalise to a list of ints
+                raw_sources = result.get('source_numbers') or (
+                    [result['source_number']] if result.get('source_number') else []
+                )
                 try:
-                    # Ensure it's an int and adjust for 0-based indexing
-                    source_idx = int(result['source_number']) - 1
-
-                    if 0 <= source_idx < len(relevant_chunks):
-                        # Mapping the extracted value to your specific document chunk
-                        source_chunk = relevant_chunks[source_idx]['chunk']
-                        result['source_metadata'] = {
-                            'document_id': str(source_chunk.document_id),
-                            'document_name': source_chunk.document.original_filename,
-                            'page': source_chunk.page_number,
-                            'section': source_chunk.section_title,
-                            'subsection': source_chunk.subsection_title,
-                            'chunk_id': str(source_chunk.chunk_id)
-                        }
+                    source_idxs = [int(s) - 1 for s in raw_sources if str(s).isdigit()]
                 except (ValueError, TypeError):
-                    # Handle cases where LLM might return a string like "1" or "Unknown"
-                    pass
+                    source_idxs = []
+
+                # Primary source = first valid index
+                primary_chunk = None
+                for idx in source_idxs:
+                    if 0 <= idx < len(relevant_chunks):
+                        primary_chunk = relevant_chunks[idx]['chunk']
+                        break
+
+                if primary_chunk:
+                    result['source_metadata'] = {
+                        'document_id': str(primary_chunk.document_id),
+                        'document_name': primary_chunk.document.original_filename,
+                        'page': primary_chunk.page_number,
+                        'section': primary_chunk.section_title,
+                        'subsection': primary_chunk.subsection_title,
+                        'chunk_id': str(primary_chunk.chunk_id)
+                    }
+
+                # Collect all unique pages across all referenced sources
+                all_pages = []
+                for idx in source_idxs:
+                    if 0 <= idx < len(relevant_chunks):
+                        pg = relevant_chunks[idx]['chunk'].page_number
+                        if pg is not None and pg not in all_pages:
+                            all_pages.append(pg)
+                result['all_pages'] = all_pages
 
             result['parameter_name'] = param_config['name']
             return result
@@ -318,6 +335,8 @@ Set "found" to false only if the parameter is completely absent from the context
 
         source_meta = extraction.get('source_metadata', {})
 
+        all_pages = extraction.get('all_pages', [])
+
         record = ExtractedParameter(
             project_id=project_id,
             parameter_name=param_config['name'],
@@ -327,6 +346,7 @@ Set "found" to false only if the parameter is completely absent from the context
             unit=extraction.get('unit'),
             source_document_id=source_meta.get('document_id'),
             source_page_number=source_meta.get('page'),
+            source_pages=json.dumps(all_pages) if all_pages else None,
             source_section=source_meta.get('section'),
             source_subsection=source_meta.get('subsection'),
             source_chunk_id=source_meta.get('chunk_id'),

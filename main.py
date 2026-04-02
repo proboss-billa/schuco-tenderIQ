@@ -248,8 +248,17 @@ async def get_extracted_parameters(project_id: uuid.UUID, db: Session = Depends(
         ExtractedParameter.project_id == project_id
     ).all()
 
+    import json as _json
     results = []
     for param in parameters:
+        # Parse stored pages JSON; fall back to primary page if missing
+        try:
+            pages = _json.loads(param.source_pages) if param.source_pages else []
+        except (ValueError, TypeError):
+            pages = []
+        if not pages and param.source_page_number is not None:
+            pages = [param.source_page_number]
+
         results.append({
             "parameter_name": param.parameter_display_name,
             "value": param.value_text,
@@ -258,6 +267,7 @@ async def get_extracted_parameters(project_id: uuid.UUID, db: Session = Depends(
             "source": {
                 "document": param.source_document.original_filename if param.source_document else None,
                 "page": param.source_page_number,
+                "pages": pages,
                 "section": param.source_section,
                 "subsection": param.source_subsection,
             },

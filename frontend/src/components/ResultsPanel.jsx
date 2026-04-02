@@ -44,6 +44,7 @@ function mergeWithRequired(extracted) {
         confidence: conf,
         notes: found.notes || null,
         page: found.source?.page ?? null,
+        pages: found.source?.pages?.length ? found.source.pages : (found.source?.page ? [found.source.page] : []),
         section: found.source?.section ?? null,
         available: true,
       };
@@ -92,7 +93,7 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
     p.available ? p.value : "Not Available",
     p.unit,
     p.available ? `${p.confidence}%` : "-",
-    p.available && p.page ? `Pg. ${p.page}` : "-",
+    p.available && p.pages?.length ? p.pages.map(pg => `Pg. ${pg}`).join(", ") : "-",
     p.available ? "Found" : "Not Available",
   ]);
   const tableHead = ["Parameter", "Value", "Unit", "Confidence", "Page", "Status"];
@@ -315,10 +316,14 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
                       <div style={{ width: 5, height: 5, borderRadius: "50%", background: confidenceColor(r.confidence) }} />
                       {r.confidence}%
                     </div>
-                    {r.page && (
-                      <span style={{ display: "inline-flex", alignItems: "center", padding: "2px 6px", background: C.greenSubtle, border: `1px solid ${C.greenBorder}`, borderRadius: 4, fontSize: 9, fontWeight: 600, color: C.green }}>
-                        Pg. {r.page}
-                      </span>
+                    {r.pages?.length > 0 && (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 3, justifyContent: "flex-end" }}>
+                        {r.pages.map(pg => (
+                          <span key={pg} style={{ display: "inline-flex", alignItems: "center", padding: "2px 6px", background: C.greenSubtle, border: `1px solid ${C.greenBorder}`, borderRadius: 4, fontSize: 9, fontWeight: 600, color: C.green }}>
+                            Pg. {pg}
+                          </span>
+                        ))}
+                      </div>
                     )}
                   </div>
                 ) : (
@@ -360,11 +365,11 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
                   <div style={{ width: 6, height: 6, borderRadius: "50%", background: confidenceColor(popup.confidence) }} />
                   {popup.confidence}% confidence
                 </div>
-                {popup.page && (
-                  <span style={{ display: "inline-flex", alignItems: "center", padding: "4px 10px", background: C.greenSubtle, border: `1px solid ${C.greenBorder}`, borderRadius: 12, fontSize: 11, fontWeight: 600, color: C.green }}>
-                    Pg. {popup.page}
+                {popup.pages?.length > 0 && popup.pages.map(pg => (
+                  <span key={pg} style={{ display: "inline-flex", alignItems: "center", padding: "4px 10px", background: C.greenSubtle, border: `1px solid ${C.greenBorder}`, borderRadius: 12, fontSize: 11, fontWeight: 600, color: C.green }}>
+                    Pg. {pg}
                   </span>
-                )}
+                ))}
                 <button onClick={() => setPopup(null)} style={{ background: "none", border: "none", color: C.text3, cursor: "pointer", padding: 2, display: "flex" }}>
                   <CloseIcon />
                 </button>
