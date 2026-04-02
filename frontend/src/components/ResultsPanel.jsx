@@ -74,6 +74,22 @@ function confidenceColor(c) {
   return c >= 85 ? C.ok : c >= 70 ? C.warn : C.err;
 }
 
+// Shorten a filename for display (max 22 chars)
+function shortName(filename) {
+  if (!filename) return "Unknown";
+  const name = filename.replace(/\.[^.]+$/, ""); // strip extension
+  return name.length > 22 ? name.slice(0, 20) + "…" : name;
+}
+
+// File-type icon char
+function fileIcon(fileType) {
+  if (!fileType) return "📄";
+  if (fileType.includes("pdf"))  return "📕";
+  if (fileType.includes("docx") || fileType.includes("doc")) return "📘";
+  if (fileType.includes("excel") || fileType.includes("xlsx")) return "📗";
+  return "📄";
+}
+
 function mergeWithRequired(extracted) {
   const map = {};
   (extracted || []).forEach(item => {
@@ -88,6 +104,12 @@ function mergeWithRequired(extracted) {
     if (found) {
       const rawConf = found.confidence ?? found.score ?? 0;
       const conf = Math.round(rawConf * (rawConf > 1 ? 1 : 100));
+      // Prefer rich sources array; fall back to legacy source field
+      const sources = found.sources?.length
+        ? found.sources
+        : (found.source?.document || found.source?.pages?.length)
+          ? [{ document: found.source.document, pages: found.source.pages?.length ? found.source.pages : (found.source.page ? [found.source.page] : []), section: found.source.section }]
+          : [];
       return {
         label: req.label,
         unit: req.unit,
@@ -96,9 +118,8 @@ function mergeWithRequired(extracted) {
         value: found.value ?? found.value_text ?? "-",
         confidence: conf,
         notes: found.notes || null,
-        page: found.source?.page ?? null,
-        pages: found.source?.pages?.length ? found.source.pages : (found.source?.page ? [found.source.page] : []),
-        section: found.source?.section ?? null,
+        sources,
+        section: sources[0]?.section ?? found.source?.section ?? null,
         available: true,
       };
     }
@@ -110,6 +131,7 @@ function mergeWithRequired(extracted) {
       value: null,
       confidence: null,
       notes: null,
+      sources: [],
       available: false,
     };
   });
@@ -125,6 +147,11 @@ function mergeWithRequired(extracted) {
       const name = item.parameter_name || item.parameter || item.name || "";
       const rawConf = item.confidence ?? item.score ?? 0;
       const conf = Math.round(rawConf * (rawConf > 1 ? 1 : 100));
+      const sources = item.sources?.length
+        ? item.sources
+        : (item.source?.document || item.source?.pages?.length)
+          ? [{ document: item.source.document, pages: item.source.pages?.length ? item.source.pages : (item.source.page ? [item.source.page] : []), section: item.source.section }]
+          : [];
       return {
         label: item.display_name || name,
         unit: item.unit || item.expected_unit || "",
@@ -133,9 +160,8 @@ function mergeWithRequired(extracted) {
         value: item.value ?? item.value_text ?? "-",
         confidence: conf,
         notes: item.notes || null,
-        page: item.source?.page ?? null,
-        pages: item.source?.pages?.length ? item.source.pages : (item.source?.page ? [item.source.page] : []),
-        section: item.source?.section ?? null,
+        sources,
+        section: sources[0]?.section ?? null,
         available: true,
         extra: true,
       };
@@ -144,13 +170,63 @@ function mergeWithRequired(extracted) {
   return [...requiredRows, ...extraRows];
 }
 
+// ── Compact source badges component ──────────────────────────────────────────
+function SourceBadges({ sources, isExpanded }) {
+  if (!sources?.length) return null;
+
+  // Collapsed: show max 3 page pills across all docs
+  if (!isExpanded) {
+    const allPages = sources.flatMap(s => (s.pages || []).map(pg => ({ pg, doc: s.document })));
+    const shown = allPages.slice(0, 3);
+    const more  = allPages.length - shown.length;
+    return (
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 3, justifyContent: "flex-end", marginTop: 4 }}>
+        {shown.map(({ pg, doc }, idx) => (
+          <span key={idx} title={doc ? `${doc} · Page ${pg}` : `Page ${pg}`}
+            style={{ display: "inline-flex", alignItems: "center", padding: "2px 6px", background: C.greenSubtle, border: `1px solid ${C.greenBorder}`, borderRadius: 4, fontSize: 9, fontWeight: 600, color: C.green, cursor: "default" }}>
+            Pg.{pg}
+          </span>
+        ))}
+        {more > 0 && (
+          <span style={{ padding: "2px 6px", background: "rgba(255,255,255,0.05)", borderRadius: 4, fontSize: 9, color: C.text3 }}>
+            +{more}
+          </span>
+        )}
+      </div>
+    );
+  }
+
+  // Expanded: show each document with its pages
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 5, marginTop: 6, alignItems: "flex-end" }}>
+      {sources.map((src, idx) => (
+        <div key={idx} style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap", justifyContent: "flex-end" }}>
+          {src.document && (
+            <span style={{ fontSize: 9, color: C.text3, fontWeight: 500, maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={src.document}>
+              {shortName(src.document)}
+            </span>
+          )}
+          {(src.pages || []).map(pg => (
+            <span key={pg}
+              style={{ display: "inline-flex", alignItems: "center", padding: "2px 6px", background: C.greenSubtle, border: `1px solid ${C.greenBorder}`, borderRadius: 4, fontSize: 9, fontWeight: 600, color: C.green }}>
+              Pg.{pg}
+            </span>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export default function ResultsPanel({ token, projectId, projectName, onClose, isMobile }) {
   const [params, setParams] = useState([]);
+  const [documents, setDocuments] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [expandedIdx, setExpandedIdx] = useState(null);
   const [popup, setPopup] = useState(null);
   const [showExportMenu, setShowExportMenu] = useState(false);
+  const [showDocs, setShowDocs] = useState(false);
   const exportRef = useRef(null);
 
   useEffect(() => {
@@ -169,6 +245,7 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
     setError("");
     setPolling(false);
     setParams([]);
+    setDocuments([]);
 
     let cancelled = false;
     let timer = null;
@@ -182,6 +259,7 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
           if (cancelled) return;
           const merged = mergeWithRequired(data.parameters);
           setParams(merged);
+          setDocuments(data.documents || []);
           setLoading(false);
           const stillProcessing = data.processing_status === "processing" || data.processing_status === "uploaded";
           if (stillProcessing && attempts < MAX_ATTEMPTS) {
@@ -227,15 +305,25 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
   const found = params.filter(p => p.available);
   const missing = params.filter(p => !p.available);
 
-  const tableRows = () => params.map(p => [
-    p.label,
-    p.available ? p.value : "Not Available",
-    p.unit,
-    p.available ? `${p.confidence}%` : "-",
-    p.available && p.pages?.length ? p.pages.map(pg => `Pg. ${pg}`).join(", ") : "-",
-    p.available ? "Found" : "Not Available",
-  ]);
-  const tableHead = ["Parameter", "Value", "Unit", "Confidence", "Page", "Status"];
+  const tableRows = () => params.map(p => {
+    // Build "Document: Pg.X, Pg.Y | Document2: Pg.Z" source string
+    const srcStr = p.available && p.sources?.length
+      ? p.sources.map(s => {
+          const doc  = s.document ? shortName(s.document) : "?";
+          const pgs  = (s.pages || []).map(pg => `Pg.${pg}`).join(", ");
+          return pgs ? `${doc}: ${pgs}` : doc;
+        }).join(" | ")
+      : "-";
+    return [
+      p.label,
+      p.available ? p.value : "Not Available",
+      p.unit,
+      p.available ? `${p.confidence}%` : "-",
+      srcStr,
+      p.available ? "Found" : "Not Available",
+    ];
+  });
+  const tableHead = ["Parameter", "Value", "Unit", "Confidence", "Source (Doc: Pages)", "Status"];
 
   const exportCSV = () => {
     const rows = [tableHead, ...tableRows()];
@@ -439,6 +527,51 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
         </div>
       )}
 
+      {/* Documents bar */}
+      {!loading && documents.length > 0 && (
+        <div style={{ borderBottom: `1px solid ${C.border}`, flexShrink: 0 }}>
+          <button
+            onClick={() => setShowDocs(v => !v)}
+            style={{ width: "100%", padding: "8px 18px", background: "none", border: "none", display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer", color: C.text2 }}>
+            <span style={{ fontSize: 11, fontWeight: 600, color: C.text3, textTransform: "uppercase", letterSpacing: "0.08em" }}>
+              {documents.length} Document{documents.length !== 1 ? "s" : ""}
+            </span>
+            <span style={{ fontSize: 10, color: C.text3 }}>{showDocs ? "▲" : "▼"}</span>
+          </button>
+          {showDocs && (
+            <div style={{ padding: "0 14px 10px" }}>
+              {documents.map((doc, i) => {
+                const isOk     = doc.processing_status === "completed" || doc.processing_status === "pending";
+                const isFailed = doc.processing_status === "failed";
+                const statusColor = isFailed ? C.err : isOk ? C.ok : C.warn;
+                return (
+                  <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", background: C.bg2, borderRadius: 7, marginBottom: 4, border: `1px solid ${C.border}` }}>
+                    <span style={{ fontSize: 14, flexShrink: 0 }}>{fileIcon(doc.file_type)}</span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 11, fontWeight: 600, color: C.text1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={doc.filename}>
+                        {doc.filename}
+                      </div>
+                      <div style={{ fontSize: 10, color: C.text3, marginTop: 1 }}>
+                        {doc.page_count ? `${doc.page_count} pages · ` : ""}{doc.num_chunks ? `${doc.num_chunks} chunks` : ""}
+                        {doc.processing_status === "failed" && doc.processing_error && (
+                          <span style={{ color: C.err }}> · {doc.processing_error.slice(0, 60)}</span>
+                        )}
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 3, flexShrink: 0 }}>
+                      <div style={{ width: 6, height: 6, borderRadius: "50%", background: statusColor }} />
+                      <span style={{ fontSize: 10, color: statusColor, fontWeight: 600, textTransform: "capitalize" }}>
+                        {doc.processing_status || "ready"}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Content */}
       <div style={{ flex: 1, overflowY: "auto", padding: "12px 14px" }}>
         {(loading || polling) && (
@@ -516,15 +649,7 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
                       <div style={{ width: 5, height: 5, borderRadius: "50%", background: confidenceColor(r.confidence) }} />
                       {r.confidence}%
                     </div>
-                    {r.pages?.length > 0 && (
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: 3, justifyContent: "flex-end" }}>
-                        {r.pages.map(pg => (
-                          <span key={pg} style={{ display: "inline-flex", alignItems: "center", padding: "2px 6px", background: C.greenSubtle, border: `1px solid ${C.greenBorder}`, borderRadius: 4, fontSize: 9, fontWeight: 600, color: C.green }}>
-                            Pg. {pg}
-                          </span>
-                        ))}
-                      </div>
-                    )}
+                    <SourceBadges sources={r.sources} isExpanded={isExpanded} />
                   </div>
                 ) : (
                   <div style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "3px 8px", borderRadius: 12, background: "rgba(255,255,255,0.04)", fontSize: 11, fontWeight: 600, color: C.text3, flexShrink: 0 }}>
@@ -565,11 +690,12 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
                   <div style={{ width: 6, height: 6, borderRadius: "50%", background: confidenceColor(popup.confidence) }} />
                   {popup.confidence}% confidence
                 </div>
-                {popup.pages?.length > 0 && popup.pages.map(pg => (
-                  <span key={pg} style={{ display: "inline-flex", alignItems: "center", padding: "4px 10px", background: C.greenSubtle, border: `1px solid ${C.greenBorder}`, borderRadius: 12, fontSize: 11, fontWeight: 600, color: C.green }}>
+                {popup.sources?.length > 0 && popup.sources.flatMap(s => (s.pages || []).map(pg => (
+                  <span key={`${s.document}-${pg}`} title={s.document || undefined}
+                    style={{ display: "inline-flex", alignItems: "center", padding: "4px 10px", background: C.greenSubtle, border: `1px solid ${C.greenBorder}`, borderRadius: 12, fontSize: 11, fontWeight: 600, color: C.green }}>
                     Pg. {pg}
                   </span>
-                ))}
+                )))}
                 <button onClick={() => setPopup(null)} style={{ background: "none", border: "none", color: C.text3, cursor: "pointer", padding: 2, display: "flex" }}>
                   <CloseIcon />
                 </button>
@@ -580,7 +706,34 @@ export default function ResultsPanel({ token, projectId, projectName, onClose, i
               <div style={{ fontSize: 22, color: C.text1, fontWeight: 700, fontFamily: F.mono, marginBottom: 16, wordBreak: "break-word", lineHeight: 1.4 }}>
                 {popup.value}
               </div>
-              {popup.section && (
+              {/* Sources breakdown */}
+              {popup.sources?.length > 0 && (
+                <div style={{ marginBottom: 14, display: "flex", flexDirection: "column", gap: 4 }}>
+                  {popup.sources.map((src, idx) => (
+                    <div key={idx} style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", background: C.bg, borderRadius: 6, border: `1px solid ${C.border}` }}>
+                      <span style={{ fontSize: 12 }}>{fileIcon(src.document?.split(".").pop())}</span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 11, fontWeight: 600, color: C.text1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={src.document}>
+                          {src.document || "Unknown document"}
+                        </div>
+                        {src.section && (
+                          <div style={{ fontSize: 10, color: C.text3, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {src.section}
+                          </div>
+                        )}
+                      </div>
+                      <div style={{ display: "flex", gap: 3, flexShrink: 0 }}>
+                        {(src.pages || []).map(pg => (
+                          <span key={pg} style={{ padding: "2px 7px", background: C.greenSubtle, border: `1px solid ${C.greenBorder}`, borderRadius: 4, fontSize: 10, fontWeight: 600, color: C.green }}>
+                            Pg.{pg}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {!popup.sources?.length && popup.section && (
                 <div style={{ marginBottom: 14 }}>
                   <span style={{ fontSize: 11, color: C.text2, lineHeight: 1.4 }}>{popup.section}</span>
                 </div>
