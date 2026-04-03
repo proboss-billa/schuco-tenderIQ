@@ -140,7 +140,13 @@ for _logger_name in (
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://poc_user:poc_password@localhost:5432/tender_poc")
 # Railway provides postgres:// but SQLAlchemy requires postgresql://
 DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-engine = create_engine(DATABASE_URL)
+engine = create_engine(
+    DATABASE_URL,
+    pool_size=10,
+    max_overflow=20,
+    pool_pre_ping=True,
+    pool_recycle=1800,
+)
 SessionLocal = sessionmaker(bind=engine)
 
 def get_db():
@@ -245,6 +251,13 @@ def initialize_pinecone():
 pinecone_index = initialize_pinecone()
 embedding_client = GoogleEmbedding()
 gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+# ── Global pipeline concurrency cap ──────────────────────────────────────────
+# Limits simultaneous _run_pipeline executions to prevent DB pool exhaustion
+# and Gemini rate-limit saturation when many projects are uploaded at once.
+# Projects beyond the limit queue in the asyncio event loop rather than crashing.
+# 3 concurrent pipelines × ~7 DB sessions each = 21 connections (within pool of 30).
+_PIPELINE_SEMAPHORE = asyncio.Semaphore(3)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def classify_file_type(filename: str) -> str:
@@ -361,15 +374,25 @@ async def _wait_for_pinecone_doc(project_id: str, document_id: str, timeout: int
 
 
 async def _run_pipeline(project_id: uuid.UUID):
+    """Queuing wrapper — acquires global pipeline slot, then delegates to inner."""
+    import time as _time
+    _timing_project_id.set(str(project_id))
+    _pipeline_log.info(f"[PIPELINE] Queued project {project_id} — waiting for pipeline slot…")
+    async with _PIPELINE_SEMAPHORE:
+        await _run_pipeline_inner(project_id)
+
+
+async def _run_pipeline_inner(project_id: uuid.UUID):
     """Background task: per-document parse → embed → extract parameters.
 
     Architecture
     ────────────
-    Documents are processed ONE AT A TIME.  After each spec document is
-    parsed, chunked, and its vectors confirmed in Pinecone, ALL 27 parameters
-    are extracted (using every doc indexed so far) and upserted into the DB.
-    The frontend's 3-second polling immediately surfaces these partial results,
-    showing "Scanning document X (2/4)…" while later docs are still processing.
+    Phase 1: Parse + embed ALL spec documents sequentially (shared DB session).
+             After each parse, fire a concurrent asyncio.Task to watch for that
+             document's vectors in Pinecone. All watch-tasks run in parallel so
+             total Phase-1 wall time = parse_time_sum + max(single_pinecone_wait).
+    Phase 2: Extraction runs ONCE after all docs are indexed — one set of
+             18 batch LLM calls regardless of how many documents were uploaded.
     """
     import time as _time
     _timing_project_id.set(str(project_id))
@@ -421,13 +444,21 @@ async def _run_pipeline(project_id: uuid.UUID):
                 doc.processing_error = str(e)[:1000]
             db.commit()
 
-        # ── Phase 1: Parse + embed + wait for ALL spec docs ─────────────────────
+        # ── Phase 1: Parse all spec docs; Pinecone waits run concurrently ───────
+        # Parse steps remain sequential — they share the 'db' session (not thread-safe).
+        # After each parse succeeds, a concurrent asyncio.Task watches Pinecone for
+        # that document's vectors. All watch-tasks overlap with subsequent parses.
+        # Total Phase-1 wall time:
+        #   (sum of parse times) + (longest single Pinecone wait)
+        # vs old sequential: sum of (parse_time + pinecone_wait) per doc.
+        # At 20 docs × 15s parse + 90s wait: ~510s vs ~2100s.
         indexed_spec_count = 0
-        indexed_docs = []  # track successfully indexed docs for status update
+        indexed_docs    = []   # successfully indexed docs (for status update later)
+        pinecone_wait_tasks = []  # concurrent asyncio.Tasks — one per indexed doc
 
         for i, doc in enumerate(spec_docs, 1):
 
-            # ── A: Parse + chunk + embed ──────────────────────────────────────
+            # ── A: Parse + chunk + embed (sequential — uses shared db session) ──
             project.pipeline_step = f"Parsing {doc.original_filename} ({i}/{total_spec})"
             doc.processing_status = "processing"
             db.commit()
@@ -450,14 +481,28 @@ async def _run_pipeline(project_id: uuid.UUID):
                 db.commit()
                 continue  # skip this doc, continue to next
 
-            # ── B: Wait for this doc's vectors to be queryable in Pinecone ────
+            # ── B: Fire Pinecone wait as a concurrent Task ────────────────────
+            # _wait_for_pinecone_doc is purely async (asyncio.sleep + HTTP poll)
+            # and does NOT touch the shared 'db' session — safe to overlap with
+            # subsequent parses. Timeout raised to 180s for large documents.
             project.pipeline_step = f"Indexing {doc.original_filename} ({i}/{total_spec})…"
             db.commit()
-            t_wait = _time.perf_counter()
-            await _wait_for_pinecone_doc(str(project_id), str(doc.document_id), timeout=90)
+            wait_task = asyncio.create_task(
+                _wait_for_pinecone_doc(str(project_id), str(doc.document_id), timeout=180)
+            )
+            pinecone_wait_tasks.append(wait_task)
+
+        # ── Synchronization barrier: all Pinecone tasks must complete ─────────
+        if pinecone_wait_tasks:
+            project.pipeline_step = (
+                f"Waiting for Pinecone to index {len(pinecone_wait_tasks)} document(s)…"
+            )
+            db.commit()
+            t_wait_all = _time.perf_counter()
+            await asyncio.gather(*pinecone_wait_tasks)
             _pipeline_log.info(
-                f"[TIMING][PIPELINE] Pinecone ready wait {doc.original_filename}: "
-                f"{_time.perf_counter() - t_wait:.2f}s"
+                f"[TIMING][PIPELINE] All Pinecone waits completed: "
+                f"{_time.perf_counter() - t_wait_all:.2f}s"
             )
 
         # ── Phase 2: Extract ALL parameters ONCE after all docs are indexed ───

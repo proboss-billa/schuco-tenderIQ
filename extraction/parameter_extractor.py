@@ -24,6 +24,19 @@ BATCH_SIZE       = 8     # params per LLM call
 SCORE_THRESHOLD  = 0.10  # discard Pinecone hits below this relevance score
 MODEL            = "gemini-3-flash-preview"
 
+# ── Module-level LLM rate limiter ─────────────────────────────────────────────
+# Caps total concurrent Gemini calls across ALL simultaneous pipeline runs.
+# Free tier ~60 req/min; 8 slots × ~5s/call ≈ 96 req/min ceiling.
+# Increase to 15 on paid tier. Lazy-init avoids event-loop mismatch on startup.
+_LLM_SEMAPHORE: Optional[asyncio.Semaphore] = None
+
+def _get_llm_semaphore() -> asyncio.Semaphore:
+    """Return module-level LLM semaphore, creating it on first call in the running loop."""
+    global _LLM_SEMAPHORE
+    if _LLM_SEMAPHORE is None:
+        _LLM_SEMAPHORE = asyncio.Semaphore(8)
+    return _LLM_SEMAPHORE
+
 
 class ParameterExtractor:
     """Extract facade parameters using batched LLM calls for speed and quality."""
@@ -335,37 +348,35 @@ Set found=true if ANY relevant information exists. Include all source numbers wi
         source_meta = extraction.get('source_metadata', {})
         all_pages   = extraction.get('all_pages', [])
 
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        fields = dict(
+            parameter_display_name = param_config['display_name'],
+            value_text             = extraction.get('value'),
+            value_numeric          = extraction.get('value_numeric'),
+            unit                   = extraction.get('unit'),
+            source_document_id     = source_meta.get('document_id'),
+            source_page_number     = source_meta.get('page'),
+            source_pages           = json.dumps(all_pages) if all_pages else None,
+            source_section         = source_meta.get('section'),
+            source_subsection      = source_meta.get('subsection'),
+            source_chunk_id        = source_meta.get('chunk_id'),
+            confidence_score       = extraction.get('confidence', 0.0),
+            extraction_method      = 'llm_batch',
+            notes                  = extraction.get('explanation'),
+            all_sources            = json.dumps(extraction.get('all_sources', [])),
+        )
+
         store_session = self.session_factory() if self.session_factory else self.db
         try:
-            existing = store_session.query(ExtractedParameter).filter(
-                ExtractedParameter.project_id    == project_id,
-                ExtractedParameter.parameter_name == param_config['name']
-            ).with_for_update().first()
-
-            fields = dict(
-                parameter_display_name = param_config['display_name'],
-                value_text             = extraction.get('value'),
-                value_numeric          = extraction.get('value_numeric'),
-                unit                   = extraction.get('unit'),
-                source_document_id     = source_meta.get('document_id'),
-                source_page_number     = source_meta.get('page'),
-                source_pages           = json.dumps(all_pages) if all_pages else None,
-                source_section         = source_meta.get('section'),
-                source_subsection      = source_meta.get('subsection'),
-                source_chunk_id        = source_meta.get('chunk_id'),
-                confidence_score       = extraction.get('confidence', 0.0),
-                extraction_method      = 'llm_batch',
-                notes                  = extraction.get('explanation'),
-                all_sources            = json.dumps(extraction.get('all_sources', [])),
+            # Atomic UPSERT — no pessimistic lock needed, eliminates deadlock risk.
+            # uq_project_param = UNIQUE(project_id, parameter_name) in extracted_parameter.py
+            stmt = (
+                pg_insert(ExtractedParameter)
+                .values(project_id=project_id, parameter_name=param_config['name'], **fields)
+                .on_conflict_do_update(constraint="uq_project_param", set_=fields)
             )
-
-            if existing:
-                for k, v in fields.items():
-                    setattr(existing, k, v)
-            else:
-                record = ExtractedParameter(project_id=project_id, parameter_name=param_config['name'], **fields)
-                store_session.add(record)
-
+            store_session.execute(stmt)
             store_session.commit()
             logger.info(f"[TIMING][STORE] '{param_config['name']}': {time.perf_counter()-t0:.2f}s")
         except Exception as e:
@@ -403,13 +414,12 @@ Set found=true if ANY relevant information exists. Include all source numbers wi
         chunk_ids = [m['id'] for m in matches]
         scores    = {m['id']: m['score'] for m in matches}
 
-        task_session = self.session_factory() if self.session_factory else self.db
-        try:
-            chunk_dicts = self._fetch_chunks_from_db(task_session, chunk_ids, scores)
-        finally:
-            if self.session_factory and task_session is not self.db:
-                task_session.close()
-
+        # Reuse self.db — _fetch_chunks_from_db is fully synchronous (no await),
+        # so it executes atomically in the event-loop thread. The embed and
+        # pinecone.query steps above run in executors and never touch the DB,
+        # so there is no concurrent session access. This eliminates ~50 new
+        # session creations per extraction run, keeping the pool healthy.
+        chunk_dicts = self._fetch_chunks_from_db(self.db, chunk_ids, scores)
         return chunk_dicts
 
     # ── Async batch extraction ────────────────────────────────────────────────
@@ -441,8 +451,11 @@ Set found=true if ANY relevant information exists. Include all source numbers wi
                     unique_kw.append(kw)
             query = ' '.join(unique_kw[:25])
 
-            # Scale top_k with doc count — more docs → more chunks to retrieve
-            top_k = min(25, max(10, 5 * num_docs))
+            # Scale top_k with doc count — more docs → more chunks to retrieve.
+            # Old cap of 25 gave ~1 chunk/doc at 20 docs → thin context.
+            # New cap of 60: 60 chunks × ~500 words avg ≈ 26k tokens —
+            # well within Gemini Flash's 1M context window.
+            top_k = min(60, max(10, 4 * num_docs))
 
             # ── Search + fetch ──
             t0 = time.perf_counter()
@@ -456,16 +469,17 @@ Set found=true if ANY relevant information exists. Include all source numbers wi
                 logger.info(f"[BATCH] No chunks for batch starting {batch_names[0]} → all not-found")
                 return [{'parameter_name': p['name'], 'found': False, 'reason': 'No relevant content'} for p in batch_params]
 
-            # ── Build context — give the LLM enough to cover all 8 params ──
-            # Each chunk ~500-1000 tokens; 12 sources ≈ 8-12k tokens — well within
-            # Gemini Flash's 1M context window and gives good per-param coverage.
-            max_sources = min(12, max(8, num_docs * 3))
+            # ── Build context — scale with doc count for full coverage ──
+            # 3 sources/doc up to 40 total: ensures representation from each document.
+            # At 20 docs: 40 sources × ~500 words avg ≈ 26k tokens — comfortable.
+            max_sources = min(40, max(8, num_docs * 3))
             context = self._build_context(chunk_dicts, max_sources=max_sources)
 
-            # ── LLM call ──
+            # ── LLM call — guarded by global rate limiter across all projects ──
             t0 = time.perf_counter()
             try:
-                response_text = await loop.run_in_executor(None, self._call_llm_batch, batch_params, context)
+                async with _get_llm_semaphore():
+                    response_text = await loop.run_in_executor(None, self._call_llm_batch, batch_params, context)
             except Exception as e:
                 logger.error(f"[BATCH] LLM failed for batch starting {batch_names[0]}: {e}")
                 return [{'parameter_name': p['name'], 'found': False, 'reason': f'LLM error: {e}'} for p in batch_params]
@@ -487,19 +501,23 @@ Set found=true if ANY relevant information exists. Include all source numbers wi
                     f"{[p['name'] for p, _ in not_found]}"
                 )
 
+                _retry_sem = asyncio.Semaphore(4)  # max 4 retries concurrent per batch
+
                 async def _retry_one(param: Dict):
-                    try:
-                        focused_query = f"{param['display_name']} {' '.join(param['search_keywords'][:6])}"
-                        focused_chunks = await self._search_pinecone_async(loop, focused_query, project_id, top_k=12)
-                        if focused_chunks:
-                            focused_context = self._build_context(focused_chunks, max_sources=6)
-                            retry_text = await loop.run_in_executor(None, self._call_llm, param, focused_context)
-                            retry_result = self._parse_llm_response(retry_text, param, focused_chunks)
-                            if retry_result.get('found'):
-                                logger.info(f"[BATCH][RETRY] {param['name']} → found on retry ✓")
-                                return param['name'], retry_result
-                    except Exception as e:
-                        logger.warning(f"[BATCH][RETRY] {param['name']} retry failed: {e}")
+                    async with _retry_sem:
+                        try:
+                            focused_query = f"{param['display_name']} {' '.join(param['search_keywords'][:6])}"
+                            focused_chunks = await self._search_pinecone_async(loop, focused_query, project_id, top_k=12)
+                            if focused_chunks:
+                                focused_context = self._build_context(focused_chunks, max_sources=6)
+                                async with _get_llm_semaphore():
+                                    retry_text = await loop.run_in_executor(None, self._call_llm, param, focused_context)
+                                retry_result = self._parse_llm_response(retry_text, param, focused_chunks)
+                                if retry_result.get('found'):
+                                    logger.info(f"[BATCH][RETRY] {param['name']} → found on retry ✓")
+                                    return param['name'], retry_result
+                        except Exception as e:
+                            logger.warning(f"[BATCH][RETRY] {param['name']} retry failed: {e}")
                     return param['name'], None
 
                 retry_outcomes = await asyncio.gather(*[_retry_one(p) for p, _ in not_found])
