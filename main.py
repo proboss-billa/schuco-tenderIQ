@@ -794,7 +794,7 @@ async def adhoc_query(project_id: uuid.UUID, query: str = Form(...), db: Session
         query_text=query,
         query_type="adhoc",
         response_text=answer,
-        num_sources_used=len(chunks),
+        num_sources_used=len(context_chunks),
     )
     db.add(query_log)
     db.commit()
@@ -809,7 +809,7 @@ async def adhoc_query(project_id: uuid.UUID, query: str = Form(...), db: Session
                 "section": chunk.section_title,
                 "subsection": chunk.subsection_title,
             }
-            for chunk in chunks[:3]
+            for chunk in context_chunks[:3]
         ],
     }
 

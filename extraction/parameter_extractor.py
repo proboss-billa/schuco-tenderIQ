@@ -21,7 +21,7 @@ from typing import Dict, List, Optional
 
 # ── Constants ────────────────────────────────────────────────────────────────
 BATCH_SIZE       = 8     # params per LLM call
-SCORE_THRESHOLD  = 0.25  # discard Pinecone hits below this relevance score
+SCORE_THRESHOLD  = 0.10  # discard Pinecone hits below this relevance score
 MODEL            = "gemini-3-flash-preview"
 
 
@@ -218,9 +218,18 @@ Return ONLY a valid JSON object with each parameter name as a key:
         try:
             # Strip markdown code fences if present
             clean = re.sub(r"^```(?:json)?\s*|\s*```$", "", response_text.strip(), flags=re.MULTILINE)
+            # Some models wrap the response in a top-level key — unwrap if needed
             parsed = json.loads(clean)
+            if not isinstance(parsed, dict):
+                raise ValueError(f"Expected dict, got {type(parsed)}")
+            # If all keys are nested under a single wrapper key, unwrap it
+            if len(parsed) == 1:
+                only_key = next(iter(parsed))
+                if only_key not in [p['name'] for p in batch_params] and isinstance(parsed[only_key], dict):
+                    parsed = parsed[only_key]
         except (json.JSONDecodeError, ValueError) as e:
-            logger.error(f"Batch JSON parse error: {e} | raw: {response_text[:300]}")
+            logger.error(f"Batch JSON parse error: {e} | raw: {response_text[:400]}")
+            # Fall back: mark all as not-found — individual retry will handle them
             return [{'parameter_name': p['name'], 'found': False, 'reason': 'JSON parse failed'} for p in batch_params]
 
         results = []
