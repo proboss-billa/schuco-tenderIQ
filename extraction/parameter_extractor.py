@@ -254,13 +254,24 @@ IMPORTANT for found=false: explanation MUST state (a) what terms were searched f
                 results.append({'parameter_name': param['name'], 'found': False, 'reason': 'Missing in response'})
                 continue
 
+            raw_conf = float(raw.get('confidence', 0.0))
+            explanation_text = raw.get('explanation', '').lower()
+            # Cap confidence when LLM signals inference rather than explicit statement
+            _inference_signals = ('inferred', 'assumed', 'estimated', 'approximately',
+                                  'likely', 'probably', 'implied', 'not explicitly')
+            if raw_conf > 0.75 and any(sig in explanation_text for sig in _inference_signals):
+                raw_conf = 0.75
+            # If found=true but value is null/empty, set confidence to 0
+            if raw.get('found') and not raw.get('value'):
+                raw_conf = 0.0
+
             result = {
                 'parameter_name':  param['name'],
                 'found':           bool(raw.get('found')),
                 'value':           raw.get('value'),
                 'value_numeric':   raw.get('value_numeric'),
                 'unit':            raw.get('unit'),
-                'confidence':      float(raw.get('confidence', 0.0)),
+                'confidence':      raw_conf,
                 'explanation':     raw.get('explanation', ''),
             }
 
@@ -309,7 +320,7 @@ Return ONLY JSON:
 }}
 
 Set found=true if ANY relevant information exists. Include all source numbers with relevant info.
-If found=false, explanation must clearly state: what terms were searched, what (if anything) was found nearby, and confirm "Not specified in documents" if truly absent.
+If found=false, explanation must clearly state: what terms were searched, what (if anything) was found nearby, and confirm "Not specified in documents" if truly absent."""
 
         try:
             response = self.gemini.models.generate_content(

@@ -23,7 +23,8 @@ MIN_TEXT_CHARS = 100
 # DPI for rendering drawing pages — 150 gives legible annotations without huge memory
 RENDER_DPI = 150
 # Max drawing pages processed via vision per document (cost/time guard)
-MAX_VISION_PAGES = 80
+# Raised from 80 → 120 for PoC so large drawing sets aren't silently truncated.
+MAX_VISION_PAGES = 120
 
 _DRAWING_PROMPT = """You are an expert facade/curtain wall engineer analysing a technical architectural drawing sheet.
 
@@ -60,6 +61,7 @@ class DrawingPDFParser:
         current_section: str | None = None
         current_subsection: str | None = None
         vision_count = 0
+        vision_skipped = 0   # pages skipped due to cap
 
         fitz_doc = fitz.open(pdf_path)
         total_pages = len(fitz_doc)
@@ -102,7 +104,8 @@ class DrawingPDFParser:
                         else:
                             logger.info(f"[DRAWING_PDF] Page {page_num}: cover/blank — skipped")
                     else:
-                        logger.info(
+                        vision_skipped += 1
+                        logger.warning(
                             f"[DRAWING_PDF] Page {page_num}: vision cap ({MAX_VISION_PAGES}) reached — skipped"
                         )
                 finally:
@@ -110,9 +113,14 @@ class DrawingPDFParser:
         finally:
             fitz_doc.close()
 
+        if vision_skipped > 0:
+            logger.warning(
+                f"[DRAWING_PDF] ⚠ {vision_skipped} drawing page(s) skipped — cap of {MAX_VISION_PAGES} reached. "
+                f"Raise MAX_VISION_PAGES in drawing_pdf_parser.py to process all pages."
+            )
         logger.info(
             f"[DRAWING_PDF] Done: {len(blocks)} blocks from {total_pages} pages "
-            f"({vision_count} via vision)"
+            f"({vision_count} via vision, {vision_skipped} skipped)"
         )
         return blocks, total_pages
 

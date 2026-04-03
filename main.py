@@ -26,7 +26,7 @@ from sqlalchemy.orm import sessionmaker, Session, joinedload
 from pinecone import Pinecone
 
 from auth.utils import create_access_token, verify_password, hash_password, decode_token, security
-from extraction.parameter_extractor import ParameterExtractor
+from extraction.parameter_extractor import ParameterExtractor, _get_llm_semaphore
 from models.base import Base
 from models.document import Document
 from models.document_chunk import DocumentChunk
@@ -692,6 +692,80 @@ async def re_extract_parameters(
     }
 
 
+@app.post("/projects/{project_id}/parameters/{param_name}/re-extract", status_code=202)
+async def re_extract_single_parameter(
+    project_id: uuid.UUID,
+    param_name: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """Re-run extraction for a single parameter. Uses vectors already in Pinecone."""
+    project = db.query(Project).filter(Project.project_id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Find the parameter config by name
+    param_config = next((p for p in FACADE_PARAMETERS if p['name'] == param_name), None)
+    if not param_config:
+        raise HTTPException(status_code=404, detail=f"Unknown parameter: {param_name}")
+
+    async def _run_single_extraction(pid: uuid.UUID, p_config: dict):
+        _timing_project_id.set(str(pid))
+        _db = SessionLocal()
+        try:
+            spec_count = _db.query(Document).filter(
+                Document.project_id == pid,
+                Document.file_type.in_(['pdf_spec', 'docx_spec', 'pdf_drawing']),
+                Document.processed == True,
+            ).count()
+
+            extractor = ParameterExtractor(
+                pinecone_index=pinecone_index,
+                embedding_client=embedding_client,
+                db_session=_db,
+                session_factory=SessionLocal,
+            )
+            loop = asyncio.get_running_loop()
+            import time as _t
+            t0 = _t.perf_counter()
+            # Use focused single-param search
+            focused_query = f"{p_config['display_name']} {' '.join(p_config['search_keywords'][:6])}"
+            param_types = p_config.get('source_types') or None
+            top_k = min(60, max(10, 4 * max(1, spec_count)))
+            chunk_dicts = await extractor._search_pinecone_async(
+                loop, focused_query, str(pid), top_k=top_k, file_types=param_types
+            )
+            if chunk_dicts:
+                context = extractor._build_context(chunk_dicts, max_sources=min(20, len(chunk_dicts)))
+                async with _get_llm_semaphore():
+                    result_text = await asyncio.wait_for(
+                        loop.run_in_executor(None, extractor._call_llm, p_config, context),
+                        timeout=90.0,
+                    )
+                result = extractor._parse_llm_response(result_text, p_config, chunk_dicts)
+            else:
+                result = {'found': False, 'explanation': 'No relevant content found in indexed documents.'}
+
+            extractor._store_extraction(str(pid), p_config, result)
+            _pipeline_log.info(
+                f"[SINGLE-EXTRACT] '{p_config['name']}' → "
+                f"{'found ✓' if result.get('found') else 'not found'} "
+                f"({_t.perf_counter()-t0:.2f}s)"
+            )
+        except Exception as e:
+            _pipeline_log.error(f"[SINGLE-EXTRACT] Failed '{p_config['name']}': {e}")
+        finally:
+            _db.close()
+
+    background_tasks.add_task(_run_single_extraction, project_id, param_config)
+    return {
+        "project_id": str(project_id),
+        "parameter_name": param_name,
+        "status": "re-extracting",
+        "message": f"Re-extraction of '{param_config['display_name']}' started.",
+    }
+
+
 @app.get("/projects/{project_id}/parameters")
 async def get_extracted_parameters(project_id: uuid.UUID, db: Session = Depends(get_db)):
     project = db.query(Project).filter(Project.project_id == project_id).first()
@@ -730,11 +804,21 @@ async def get_extracted_parameters(project_id: uuid.UUID, db: Session = Depends(
                     "section":     param.source_section,
                 }]
 
+        # Fetch source chunk text for "show evidence" in UI
+        chunk_text = None
+        if param.source_chunk_id and param.source_chunk:
+            chunk_text = param.source_chunk.chunk_text
+
+        # Detect multi-document sourcing (potential conflict worth showing)
+        unique_docs = {s.get("document_id") for s in all_sources if s.get("document_id")}
+        multi_source = len(unique_docs) > 1
+
         results.append({
             "parameter_name": param.parameter_display_name,
+            "parameter_key": param.parameter_name,
             "value": param.value_text,
             "unit": param.unit,
-            "confidence": float(param.confidence_score),
+            "confidence": float(param.confidence_score) if param.confidence_score is not None else None,
             # Primary source (backwards compatible)
             "source": {
                 "document": param.source_document.original_filename if param.source_document else None,
@@ -746,6 +830,10 @@ async def get_extracted_parameters(project_id: uuid.UUID, db: Session = Depends(
             # Full multi-document source list (new)
             "sources": all_sources,
             "notes": param.notes,
+            # Source evidence text — shown in detail modal
+            "source_text": chunk_text,
+            # True when value was drawn from multiple documents (show multi-source badge)
+            "multi_source": multi_source,
         })
 
     from models.document import Document as _Document
