@@ -22,7 +22,7 @@ from typing import Dict, List, Optional
 # ── Constants ────────────────────────────────────────────────────────────────
 BATCH_SIZE       = 8     # params per LLM call
 SCORE_THRESHOLD  = 0.25  # discard Pinecone hits below this relevance score
-MODEL            = "gemini-2.5-flash"
+MODEL            = "gemini-3-flash-preview"
 
 
 class ParameterExtractor:
