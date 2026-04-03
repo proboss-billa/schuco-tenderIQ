@@ -447,8 +447,10 @@ Set found=true if ANY relevant information exists. Include all source numbers wi
                 logger.info(f"[BATCH] No chunks for batch starting {batch_names[0]} → all not-found")
                 return [{'parameter_name': p['name'], 'found': False, 'reason': 'No relevant content'} for p in batch_params]
 
-            # ── Build context ──
-            max_sources = min(8, max(5, num_docs * 2))
+            # ── Build context — give the LLM enough to cover all 8 params ──
+            # Each chunk ~500-1000 tokens; 12 sources ≈ 8-12k tokens — well within
+            # Gemini Flash's 1M context window and gives good per-param coverage.
+            max_sources = min(12, max(8, num_docs * 3))
             context = self._build_context(chunk_dicts, max_sources=max_sources)
 
             # ── LLM call ──
@@ -465,6 +467,31 @@ Set found=true if ANY relevant information exists. Include all source numbers wi
             )
 
             results = self._parse_batch_response(response_text, batch_params, chunk_dicts)
+
+            # ── Targeted retry for not-found params ──────────────────────────
+            # The broad combined query may miss niche params. Give each not-found
+            # param its own focused search + single-param LLM call.
+            not_found = [(p, r) for p, r in zip(batch_params, results) if not r.get('found')]
+            if not_found:
+                logger.info(
+                    f"[BATCH] {len(not_found)} not-found in batch — retrying individually: "
+                    f"{[p['name'] for p,_ in not_found]}"
+                )
+                for param, old_result in not_found:
+                    try:
+                        focused_query = f"{param['display_name']} {' '.join(param['search_keywords'][:6])}"
+                        focused_chunks = await self._search_pinecone_async(loop, focused_query, project_id, top_k=12)
+                        if focused_chunks:
+                            focused_context = self._build_context(focused_chunks, max_sources=6)
+                            retry_text = await loop.run_in_executor(None, self._call_llm, param, focused_context)
+                            retry_result = self._parse_llm_response(retry_text, param, focused_chunks)
+                            if retry_result.get('found'):
+                                logger.info(f"[BATCH][RETRY] {param['name']} → found on retry ✓")
+                                # Replace the not-found entry
+                                idx = next(i for i, r in enumerate(results) if r.get('parameter_name') == param['name'])
+                                results[idx] = retry_result
+                    except Exception as e:
+                        logger.warning(f"[BATCH][RETRY] {param['name']} retry failed: {e}")
 
             logger.info(
                 f"[TIMING][BATCH] {batch_names[0]}…{batch_names[-1]} "
