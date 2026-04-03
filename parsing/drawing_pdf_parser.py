@@ -72,22 +72,28 @@ class DrawingPDFParser:
                     page_text = fitz_page.get_text("text").strip()
                     if len(page_text) >= MIN_TEXT_CHARS:
                         # ── Text page: standard span extraction ──────────────
+                        # source_type = 'pdf_spec' so parameter search routing
+                        # treats these chunks the same as a text specification.
                         blocks, current_section, current_subsection = _extract_text_spans(
-                            fitz_page, page_num, blocks, current_section, current_subsection
+                            fitz_page, page_num, blocks, current_section, current_subsection,
+                            source_type="pdf_spec",
                         )
                     elif vision_count < MAX_VISION_PAGES:
                         # ── Drawing page: render + vision ─────────────────────
+                        # source_type = 'pdf_drawing' so parameter search routing
+                        # prioritises these chunks for Tender Drawing parameters.
                         vision_text = self._vision_extract(fitz_page, page_num)
                         vision_count += 1
                         if vision_text and "Cover/Index" not in vision_text:
                             blocks.append({
-                                "type":       "text",
-                                "text":       vision_text,
-                                "page":       page_num,
-                                "section":    f"Drawing Sheet {page_num}",
-                                "subsection": None,
-                                "font_size":  None,
-                                "is_heading": False,
+                                "type":        "text",
+                                "text":        vision_text,
+                                "page":        page_num,
+                                "section":     f"Drawing Sheet {page_num}",
+                                "subsection":  None,
+                                "font_size":   None,
+                                "is_heading":  False,
+                                "source_type": "pdf_drawing",   # ← drawing chunk
                             })
                             logger.info(
                                 f"[DRAWING_PDF] Page {page_num}: vision → {len(vision_text)} chars"
@@ -140,8 +146,13 @@ def _extract_text_spans(
     blocks: List[Dict],
     current_section: str | None,
     current_subsection: str | None,
+    source_type: str = "pdf_spec",
 ) -> Tuple[List[Dict], str | None, str | None]:
-    """Identical span-extraction logic to PDFParser (shared utility)."""
+    """Span-extraction logic shared with PDFParser.
+
+    source_type is stored on every block so _store_chunks() can use it as the
+    Pinecone 'file_type' metadata field, enabling per-parameter search routing.
+    """
     try:
         text_dict = fitz_page.get_text("dict")
         for block in text_dict.get("blocks", []):
@@ -162,13 +173,14 @@ def _extract_text_spans(
                         else:
                             current_subsection = text
                     blocks.append({
-                        "type":       "text",
-                        "text":       text,
-                        "page":       page_num,
-                        "section":    current_section,
-                        "subsection": current_subsection,
-                        "font_size":  font_size,
-                        "is_heading": is_heading,
+                        "type":        "text",
+                        "text":        text,
+                        "page":        page_num,
+                        "section":     current_section,
+                        "subsection":  current_subsection,
+                        "font_size":   font_size,
+                        "is_heading":  is_heading,
+                        "source_type": source_type,   # ← routing metadata
                     })
     except Exception as e:
         logger.warning(f"[DRAWING_PDF] Span extraction failed page {page_num}: {e}")

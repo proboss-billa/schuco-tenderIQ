@@ -386,7 +386,10 @@ class DocumentProcessor:
                 "metadata": {
                     "document_id": str(document.document_id),
                     "project_id":  str(self.project_id),
-                    "file_type":   document.file_type,
+                    # Use per-chunk source_type when available (set by DrawingPDFParser
+                    # to distinguish vision-extracted drawing pages from text pages within
+                    # the same mixed PDF). Falls back to document-level file_type.
+                    "file_type":   chunk.get("source_type", document.file_type),
                     "section":     chunk.get("section") or "",
                     "subsection":  chunk.get("subsection") or "",
                     "page_start":  chunk.get("page_start") or 0,
@@ -632,8 +635,15 @@ class DocumentProcessor:
 
         # ── Step 1: Parse ─────────────────────────────────────────────────────
         t0 = time.perf_counter()
-        if document.file_type == 'pdf_spec':
-            parser = self._choose_pdf_parser(document.file_path)
+        if document.file_type in ('pdf_spec', 'pdf_drawing'):
+            # pdf_drawing → always hybrid vision parser (skip char-count sampling).
+            # pdf_spec    → auto-detect via char count; vision used if drawing-heavy.
+            if document.file_type == 'pdf_drawing':
+                from parsing.drawing_pdf_parser import DrawingPDFParser
+                parser = DrawingPDFParser()
+                logger.info(f"[PARSE] {doc_name}: pdf_drawing → forced DrawingPDFParser")
+            else:
+                parser = self._choose_pdf_parser(document.file_path)
             parsed_content, page_count = parser.parse_with_page_count(document.file_path)
             document.page_count = page_count
         elif document.file_type in ('dxf_drawing', 'dwg_drawing'):

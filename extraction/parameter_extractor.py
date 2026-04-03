@@ -394,20 +394,49 @@ Set found=true if ANY relevant information exists. Include all source numbers wi
         query: str,
         project_id: str,
         top_k: int,
+        file_types: Optional[List[str]] = None,
     ) -> List[Dict]:
-        """Embed query + Pinecone search + DB fetch, return scored chunk dicts."""
+        """Embed query + Pinecone search + DB fetch, return scored chunk dicts.
+
+        file_types: when provided, restricts the Pinecone search to chunks whose
+        'file_type' metadata matches one of the listed values (e.g. ['pdf_drawing',
+        'dxf_drawing']). If the filtered search returns no results it automatically
+        retries without the type filter so no content is ever silently missed.
+        """
         embedding = await loop.run_in_executor(None, lambda: self.embedder.embed([query])[0])
+
+        pinecone_filter: Dict = {"project_id": project_id}
+        if file_types:
+            pinecone_filter["file_type"] = {"$in": file_types}
 
         pinecone_results = await loop.run_in_executor(
             None, lambda: self.pinecone.query(
                 vector=embedding,
                 top_k=top_k,
-                filter={"project_id": project_id},
+                filter=pinecone_filter,
                 include_metadata=True,
             )
         )
 
         matches = [m for m in pinecone_results['matches'] if m['score'] >= SCORE_THRESHOLD]
+
+        # Fallback: if type-filtered search returns nothing, search all types.
+        # This handles projects where drawing PDFs haven't been uploaded yet, or
+        # where the file_type label didn't match the expected type.
+        if not matches and file_types:
+            logger.info(
+                f"[SEARCH] No results with file_type filter {file_types} — retrying without filter"
+            )
+            pinecone_results = await loop.run_in_executor(
+                None, lambda: self.pinecone.query(
+                    vector=embedding,
+                    top_k=top_k,
+                    filter={"project_id": project_id},
+                    include_metadata=True,
+                )
+            )
+            matches = [m for m in pinecone_results['matches'] if m['score'] >= SCORE_THRESHOLD]
+
         if not matches:
             return []
 
@@ -457,9 +486,23 @@ Set found=true if ANY relevant information exists. Include all source numbers wi
             # well within Gemini Flash's 1M context window.
             top_k = min(60, max(10, 4 * num_docs))
 
+            # Build union of source_types for all params in this batch.
+            # Pinecone search is filtered to only those document types, so a batch
+            # of Tender Drawing params searches drawing chunks first; a batch of
+            # Commercial params searches only text spec/docx chunks.
+            # _search_pinecone_async falls back to all types if none match.
+            batch_source_types: Optional[List[str]] = None
+            all_types: set = set()
+            for p in batch_params:
+                all_types.update(p.get('source_types', []))
+            if all_types:
+                batch_source_types = list(all_types)
+
             # ── Search + fetch ──
             t0 = time.perf_counter()
-            chunk_dicts = await self._search_pinecone_async(loop, query, project_id, top_k)
+            chunk_dicts = await self._search_pinecone_async(
+                loop, query, project_id, top_k, file_types=batch_source_types
+            )
             logger.info(
                 f"[TIMING][BATCH] {batch_names[0]}…{batch_names[-1]} "
                 f"search: {time.perf_counter()-t0:.2f}s → {len(chunk_dicts)} chunks"
@@ -507,7 +550,11 @@ Set found=true if ANY relevant information exists. Include all source numbers wi
                     async with _retry_sem:
                         try:
                             focused_query = f"{param['display_name']} {' '.join(param['search_keywords'][:6])}"
-                            focused_chunks = await self._search_pinecone_async(loop, focused_query, project_id, top_k=12)
+                            # Use this param's own source_types for a tighter retry search
+                            param_types = param.get('source_types') or None
+                            focused_chunks = await self._search_pinecone_async(
+                                loop, focused_query, project_id, top_k=12, file_types=param_types
+                            )
                             if focused_chunks:
                                 focused_context = self._build_context(focused_chunks, max_sources=6)
                                 async with _get_llm_semaphore():
