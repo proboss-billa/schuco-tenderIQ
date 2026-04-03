@@ -197,6 +197,10 @@ class DocumentProcessor:
                     "page_end":   block.get("page"),
                     "all_words":  [],
                     "is_table":   block["type"] == "table",
+                    # source_type drives Pinecone routing — 'pdf_drawing' wins over
+                    # 'pdf_spec' within a section so drawing pages are not diluted
+                    # by neighbouring text-extraction blocks.
+                    "source_type": block.get("source_type"),
                 }
                 sections.append(current)
 
@@ -205,6 +209,9 @@ class DocumentProcessor:
                 current["page_end"] = block.get("page")
             if block["type"] != "table":
                 current["is_table"] = False   # mixed → not a pure table section
+            # Escalate to pdf_drawing if ANY block in this section is from Vision
+            if block.get("source_type") == "pdf_drawing":
+                current["source_type"] = "pdf_drawing"
 
         return sections
 
@@ -250,6 +257,7 @@ class DocumentProcessor:
                     "text":            " ".join(parent_words),
                     "document_id":     document.document_id,
                     "file_type":       document.file_type,
+                    "source_type":     sec.get("source_type", document.file_type),
                     "page_start":      sec["page_start"],
                     "page_end":        sec["page_end"],
                     "section":         sec["section"],
@@ -273,6 +281,7 @@ class DocumentProcessor:
                         "text":            " ".join(child_words),
                         "document_id":     document.document_id,
                         "file_type":       document.file_type,
+                        "source_type":     sec.get("source_type", document.file_type),
                         "page_start":      sec["page_start"],
                         "page_end":        sec["page_end"],
                         "section":         sec["section"],
