@@ -421,8 +421,10 @@ async def _run_pipeline(project_id: uuid.UUID):
                 doc.processing_error = str(e)[:1000]
             db.commit()
 
-        # ── Process spec docs one-by-one; extract parameters after each ───────
+        # ── Phase 1: Parse + embed + wait for ALL spec docs ─────────────────────
         indexed_spec_count = 0
+        indexed_docs = []  # track successfully indexed docs for status update
+
         for i, doc in enumerate(spec_docs, 1):
 
             # ── A: Parse + chunk + embed ──────────────────────────────────────
@@ -435,6 +437,7 @@ async def _run_pipeline(project_id: uuid.UUID):
                 processor._process_specification_document(doc)
                 doc.processing_status = "indexed"
                 indexed_spec_count += 1
+                indexed_docs.append(doc)
                 db.commit()
                 _pipeline_log.info(
                     f"[TIMING][PIPELINE] Parse+embed {doc.original_filename} "
@@ -445,7 +448,7 @@ async def _run_pipeline(project_id: uuid.UUID):
                 doc.processing_status = "failed"
                 doc.processing_error = str(e)[:1000]
                 db.commit()
-                continue  # skip extraction for this doc, proceed to next
+                continue  # skip this doc, continue to next
 
             # ── B: Wait for this doc's vectors to be queryable in Pinecone ────
             project.pipeline_step = f"Indexing {doc.original_filename} ({i}/{total_spec})…"
@@ -457,10 +460,12 @@ async def _run_pipeline(project_id: uuid.UUID):
                 f"{_time.perf_counter() - t_wait:.2f}s"
             )
 
-            # ── C: Extract all 27 params with all indexed docs so far ─────────
+        # ── Phase 2: Extract ALL parameters ONCE after all docs are indexed ───
+        # Running extraction once (not per-doc) reduces LLM calls by ~N× where
+        # N is the number of spec documents, which is the main source of slowness.
+        if indexed_spec_count > 0:
             project.pipeline_step = (
-                f"Extracting parameters from {doc.original_filename} "
-                f"({i}/{total_spec} docs scanned)…"
+                f"Extracting parameters from {indexed_spec_count} document(s)…"
             )
             db.commit()
             db.expire_all()
@@ -475,18 +480,22 @@ async def _run_pipeline(project_id: uuid.UUID):
             extractions = await extractor.extract_all_parameters_async(
                 str(project_id),
                 facade_parameters=FACADE_PARAMETERS,
-                max_concurrent=5,
+                max_concurrent=6,
                 num_docs=indexed_spec_count,
             )
             found_count = len([e for e in extractions if e.get("found")])
             _pipeline_log.info(
-                f"[TIMING][PIPELINE] Extraction after doc {i}/{total_spec}: "
+                f"[TIMING][PIPELINE] Extraction (single pass, {indexed_spec_count} docs): "
                 f"{_time.perf_counter() - t_extract:.2f}s — "
                 f"{found_count}/{len(extractions)} params found"
             )
+        else:
+            _pipeline_log.warning("[PIPELINE] No spec docs indexed — skipping extraction")
 
+        # Mark all successfully indexed docs as completed
+        for doc in indexed_docs:
             doc.processing_status = "completed"
-            db.commit()
+        db.commit()
 
         # ── All documents done ────────────────────────────────────────────────
         project.processing_status = "completed"

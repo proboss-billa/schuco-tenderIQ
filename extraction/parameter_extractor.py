@@ -477,16 +477,17 @@ Set found=true if ANY relevant information exists. Include all source numbers wi
 
             results = self._parse_batch_response(response_text, batch_params, chunk_dicts)
 
-            # ── Targeted retry for not-found params ──────────────────────────
+            # ── Targeted retry for not-found params (concurrent) ─────────────
             # The broad combined query may miss niche params. Give each not-found
-            # param its own focused search + single-param LLM call.
+            # param its own focused search + single-param LLM call, all in parallel.
             not_found = [(p, r) for p, r in zip(batch_params, results) if not r.get('found')]
             if not_found:
                 logger.info(
-                    f"[BATCH] {len(not_found)} not-found in batch — retrying individually: "
-                    f"{[p['name'] for p,_ in not_found]}"
+                    f"[BATCH] {len(not_found)} not-found in batch — retrying concurrently: "
+                    f"{[p['name'] for p, _ in not_found]}"
                 )
-                for param, old_result in not_found:
+
+                async def _retry_one(param: Dict):
                     try:
                         focused_query = f"{param['display_name']} {' '.join(param['search_keywords'][:6])}"
                         focused_chunks = await self._search_pinecone_async(loop, focused_query, project_id, top_k=12)
@@ -496,11 +497,16 @@ Set found=true if ANY relevant information exists. Include all source numbers wi
                             retry_result = self._parse_llm_response(retry_text, param, focused_chunks)
                             if retry_result.get('found'):
                                 logger.info(f"[BATCH][RETRY] {param['name']} → found on retry ✓")
-                                # Replace the not-found entry
-                                idx = next(i for i, r in enumerate(results) if r.get('parameter_name') == param['name'])
-                                results[idx] = retry_result
+                                return param['name'], retry_result
                     except Exception as e:
                         logger.warning(f"[BATCH][RETRY] {param['name']} retry failed: {e}")
+                    return param['name'], None
+
+                retry_outcomes = await asyncio.gather(*[_retry_one(p) for p, _ in not_found])
+                for pname, retry_result in retry_outcomes:
+                    if retry_result is not None:
+                        idx = next(j for j, r in enumerate(results) if r.get('parameter_name') == pname)
+                        results[idx] = retry_result
 
             logger.info(
                 f"[TIMING][BATCH] {batch_names[0]}…{batch_names[-1]} "
