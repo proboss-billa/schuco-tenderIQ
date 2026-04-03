@@ -472,7 +472,11 @@ async def _run_pipeline_inner(project_id: uuid.UUID):
         for i, doc in enumerate(spec_docs, 1):
 
             # ── A: Parse + chunk + embed (sequential — uses shared db session) ──
-            project.pipeline_step = f"Parsing {doc.original_filename} ({i}/{total_spec})"
+            is_drawing = doc.file_type == "pdf_drawing"
+            if is_drawing:
+                project.pipeline_step = f"Analysing drawing sheets in {doc.original_filename} with Vision AI ({i}/{total_spec})…"
+            else:
+                project.pipeline_step = f"Parsing specification: {doc.original_filename} ({i}/{total_spec})…"
             doc.processing_status = "processing"
             db.commit()
 
@@ -498,7 +502,7 @@ async def _run_pipeline_inner(project_id: uuid.UUID):
             # _wait_for_pinecone_doc is purely async (asyncio.sleep + HTTP poll)
             # and does NOT touch the shared 'db' session — safe to overlap with
             # subsequent parses. Timeout raised to 180s for large documents.
-            project.pipeline_step = f"Indexing {doc.original_filename} ({i}/{total_spec})…"
+            project.pipeline_step = f"Vectorising {doc.original_filename} into knowledge base ({i}/{total_spec})…"
             db.commit()
             wait_task = asyncio.create_task(
                 _wait_for_pinecone_doc(str(project_id), str(doc.document_id), timeout=180)
@@ -508,7 +512,7 @@ async def _run_pipeline_inner(project_id: uuid.UUID):
         # ── Synchronization barrier: all Pinecone tasks must complete ─────────
         if pinecone_wait_tasks:
             project.pipeline_step = (
-                f"Waiting for Pinecone to index {len(pinecone_wait_tasks)} document(s)…"
+                f"Indexing {len(pinecone_wait_tasks)} document(s) into vector database…"
             )
             db.commit()
             t_wait_all = _time.perf_counter()
@@ -523,7 +527,7 @@ async def _run_pipeline_inner(project_id: uuid.UUID):
         # N is the number of spec documents, which is the main source of slowness.
         if indexed_spec_count > 0:
             project.pipeline_step = (
-                f"Extracting parameters from {indexed_spec_count} document(s)…"
+                f"Extracting {len(FACADE_PARAMETERS)} parameters across {indexed_spec_count} document(s)…"
             )
             db.commit()
             db.expire_all()

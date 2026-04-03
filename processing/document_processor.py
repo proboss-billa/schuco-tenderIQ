@@ -7,6 +7,8 @@ from typing import List, Dict, Any
 import uuid
 from pathlib import Path
 
+from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
+
 from google import genai
 from google.genai import types
 import os
@@ -303,11 +305,24 @@ class DocumentProcessor:
 
         return parents, children, chunk_idx
 
+    @retry(
+        retry=retry_if_exception_type(Exception),
+        wait=wait_exponential(multiplier=1, min=4, max=30),
+        stop=stop_after_attempt(3),
+        before_sleep=lambda rs: logger.warning(
+            f"[EMBED] Retry {rs.attempt_number} after error: {rs.outcome.exception()}"
+        ),
+    )
+    def _embed_with_retry(self, texts: List[str]) -> List[List[float]]:
+        """Single embedding batch call with tenacity retry."""
+        return self.embedder.embed(texts)
+
     def _generate_embeddings(self, texts: List[str]) -> List[List[float]]:
         """
         Call the embedding client in batches to avoid hitting API size limits.
         Assumes self.embedder exposes:
             embedder.embed(texts: List[str]) -> List[List[float]]
+        Each batch is retried up to 3× with exponential backoff on any error.
         """
         all_embeddings: List[List[float]] = []
         t0 = time.perf_counter()
@@ -315,7 +330,7 @@ class DocumentProcessor:
         for batch_num, start in enumerate(range(0, len(texts), EMBED_BATCH_SIZE), 1):
             batch = texts[start: start + EMBED_BATCH_SIZE]
             bt = time.perf_counter()
-            batch_embeddings = self.embedder.embed(batch)
+            batch_embeddings = self._embed_with_retry(batch)
             logger.info(
                 f"[TIMING][EMBED] batch {batch_num} ({len(batch)} texts): "
                 f"{time.perf_counter() - bt:.2f}s"

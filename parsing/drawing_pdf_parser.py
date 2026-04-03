@@ -14,6 +14,7 @@ from typing import List, Dict, Tuple
 import fitz  # PyMuPDF
 from google import genai
 from google.genai import types
+from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 
 logger = logging.getLogger(__name__)
 
@@ -116,29 +117,42 @@ class DrawingPDFParser:
         return blocks, total_pages
 
     def _vision_extract(self, fitz_page, page_num: int) -> str:
-        """Render one page to PNG and call Gemini Vision."""
+        """Render one page to PNG and call Gemini Vision (with retry)."""
         try:
             mat = fitz.Matrix(RENDER_DPI / 72, RENDER_DPI / 72)
             pix = fitz_page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
             img_bytes = pix.tobytes("png")
             del pix
-
-            response = self.gemini.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=[
-                    types.Part.from_bytes(data=img_bytes, mime_type="image/png"),
-                    types.Part.from_text(_DRAWING_PROMPT),
-                ],
-                config=types.GenerateContentConfig(
-                    temperature=0.1,
-                    max_output_tokens=2048,
-                ),
-            )
-            del img_bytes
-            return response.text or ""
+            try:
+                return self._call_vision_with_retry(img_bytes, page_num)
+            finally:
+                del img_bytes
         except Exception as e:
-            logger.warning(f"[DRAWING_PDF] Vision failed page {page_num}: {e}")
+            logger.warning(f"[DRAWING_PDF] Vision failed page {page_num} after retries: {e}")
             return ""
+
+    @retry(
+        retry=retry_if_exception_type(Exception),
+        wait=wait_exponential(multiplier=1, min=5, max=30),
+        stop=stop_after_attempt(3),
+        before_sleep=lambda rs: logger.warning(
+            f"[DRAWING_PDF] Vision retry {rs.attempt_number}: {rs.outcome.exception()}"
+        ),
+    )
+    def _call_vision_with_retry(self, img_bytes: bytes, page_num: int) -> str:
+        """Single Vision API call — retried up to 3× by tenacity."""
+        response = self.gemini.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=[
+                types.Part.from_bytes(data=img_bytes, mime_type="image/png"),
+                types.Part.from_text(_DRAWING_PROMPT),
+            ],
+            config=types.GenerateContentConfig(
+                temperature=0.1,
+                max_output_tokens=2048,
+            ),
+        )
+        return response.text or ""
 
 
 def _extract_text_spans(

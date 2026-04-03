@@ -199,10 +199,12 @@ Return ONLY a valid JSON object with each parameter name as a key:
     "unit": null,
     "confidence": 0.0,
     "source_numbers": [],
-    "explanation": "No water tightness requirement found in the provided sources"
+    "explanation": "Not specified in any of the provided documents. Related terms searched: watertight, water resistance, EN 12155."
   }},
   ... (one entry per parameter listed above)
-}}"""
+}}
+
+IMPORTANT for found=false: explanation MUST state (a) what terms were searched for, (b) whether a related value was seen but couldn't be confirmed, or (c) clearly say "Not specified in documents" — never leave explanation vague."""
 
         try:
             response = self.gemini.models.generate_content(
@@ -306,7 +308,8 @@ Return ONLY JSON:
   "explanation": "brief explanation"
 }}
 
-Set found=true if ANY relevant information exists. Include all source numbers with relevant info."""
+Set found=true if ANY relevant information exists. Include all source numbers with relevant info.
+If found=false, explanation must clearly state: what terms were searched, what (if anything) was found nearby, and confirm "Not specified in documents" if truly absent.
 
         try:
             response = self.gemini.models.generate_content(
@@ -522,7 +525,13 @@ Set found=true if ANY relevant information exists. Include all source numbers wi
             t0 = time.perf_counter()
             try:
                 async with _get_llm_semaphore():
-                    response_text = await loop.run_in_executor(None, self._call_llm_batch, batch_params, context)
+                    response_text = await asyncio.wait_for(
+                        loop.run_in_executor(None, self._call_llm_batch, batch_params, context),
+                        timeout=120.0,
+                    )
+            except asyncio.TimeoutError:
+                logger.error(f"[BATCH] LLM timed out (120s) for batch starting {batch_names[0]} — marking not found")
+                return [{'parameter_name': p['name'], 'found': False, 'reason': 'LLM timeout'} for p in batch_params]
             except Exception as e:
                 logger.error(f"[BATCH] LLM failed for batch starting {batch_names[0]}: {e}")
                 return [{'parameter_name': p['name'], 'found': False, 'reason': f'LLM error: {e}'} for p in batch_params]
@@ -558,7 +567,10 @@ Set found=true if ANY relevant information exists. Include all source numbers wi
                             if focused_chunks:
                                 focused_context = self._build_context(focused_chunks, max_sources=6)
                                 async with _get_llm_semaphore():
-                                    retry_text = await loop.run_in_executor(None, self._call_llm, param, focused_context)
+                                    retry_text = await asyncio.wait_for(
+                                        loop.run_in_executor(None, self._call_llm, param, focused_context),
+                                        timeout=90.0,
+                                    )
                                 retry_result = self._parse_llm_response(retry_text, param, focused_chunks)
                                 if retry_result.get('found'):
                                     logger.info(f"[BATCH][RETRY] {param['name']} → found on retry ✓")
