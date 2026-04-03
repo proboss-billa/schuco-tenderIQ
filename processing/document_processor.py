@@ -301,12 +301,22 @@ class DocumentProcessor:
             embedder.embed(texts: List[str]) -> List[List[float]]
         """
         all_embeddings: List[List[float]] = []
+        t0 = time.perf_counter()
 
-        for start in range(0, len(texts), EMBED_BATCH_SIZE):
+        for batch_num, start in enumerate(range(0, len(texts), EMBED_BATCH_SIZE), 1):
             batch = texts[start: start + EMBED_BATCH_SIZE]
+            bt = time.perf_counter()
             batch_embeddings = self.embedder.embed(batch)
+            logger.info(
+                f"[TIMING][EMBED] batch {batch_num} ({len(batch)} texts): "
+                f"{time.perf_counter() - bt:.2f}s"
+            )
             all_embeddings.extend(batch_embeddings)
 
+        logger.info(
+            f"[TIMING][EMBED] total {len(texts)} texts in "
+            f"{len(all_embeddings)} embeddings: {time.perf_counter() - t0:.2f}s"
+        )
         return all_embeddings
 
     def _store_chunks(
@@ -324,6 +334,7 @@ class DocumentProcessor:
 
         Pinecone vector id format: "{document_id}_{chunk_index}"
         """
+        t0 = time.perf_counter()
         # ── Insert level-0 parent chunks (DB only) ────────────────────────────
         for chunk in parent_chunks:
             db_chunk = DocumentChunk(
@@ -385,12 +396,21 @@ class DocumentProcessor:
                 },
             })
 
+        t_flush = time.perf_counter()
         # Batch-upsert to Pinecone (max 100 vectors per call)
         PINECONE_BATCH = 100
         for start in range(0, len(pinecone_vectors), PINECONE_BATCH):
             self.pinecone.upsert(vectors=pinecone_vectors[start: start + PINECONE_BATCH])
+        t_pine = time.perf_counter()
 
         self.db.commit()
+        logger.info(
+            f"[TIMING][STORE] {len(parent_chunks)} parents + {len(child_chunks)} children — "
+            f"DB flush: {t_flush - t0:.2f}s | "
+            f"Pinecone upsert: {t_pine - t_flush:.2f}s | "
+            f"DB commit: {time.perf_counter() - t_pine:.2f}s | "
+            f"total: {time.perf_counter() - t0:.2f}s"
+        )
 
     def _parse_excel_boq(self, file_path: str) -> List[Dict]:
         """Delegate to ExcelBOQParser."""
@@ -555,6 +575,39 @@ class DocumentProcessor:
 
         self._extract_all_parameters()
 
+    def _choose_pdf_parser(self, file_path: str):
+        """
+        Sample the first 5 pages to decide between text-extraction and vision parsing.
+
+        Drawing PDFs (CAD sheets rendered to PDF) have virtually no selectable
+        text — PyMuPDF returns < MIN_TEXT_CHARS characters per page.
+        Text-heavy specification documents have hundreds of chars per page.
+        """
+        import fitz as _fitz
+        MIN_TEXT_CHARS = 100
+        sample_doc = _fitz.open(file_path)
+        sample_n   = min(5, len(sample_doc))
+        total_chars = sum(
+            len(sample_doc[i].get_text("text").strip()) for i in range(sample_n)
+        )
+        sample_doc.close()
+        avg = total_chars / sample_n if sample_n else 0
+
+        if avg < MIN_TEXT_CHARS:
+            logger.info(
+                f"[AUTO-DETECT] {file_path}: avg {avg:.0f} chars/page "
+                f"→ DRAWING PDF — using Gemini Vision parser"
+            )
+            from parsing.drawing_pdf_parser import DrawingPDFParser
+            return DrawingPDFParser()
+        else:
+            logger.info(
+                f"[AUTO-DETECT] {file_path}: avg {avg:.0f} chars/page "
+                f"→ TEXT PDF — using standard parser"
+            )
+            from parsing.pdf_parser import PDFParser
+            return PDFParser()
+
     def _process_specification_document(self, document):
         """
         Process a PDF/DOCX specification using the streaming hierarchical pipeline.
@@ -574,23 +627,32 @@ class DocumentProcessor:
         4. _store_chunks()                — INSERT to PostgreSQL + Pinecone, commit
         5. del parents/children/embeddings — release batch memory
         """
+        doc_name = document.original_filename
+        t_doc_start = time.perf_counter()
 
         # ── Step 1: Parse ─────────────────────────────────────────────────────
+        t0 = time.perf_counter()
         if document.file_type == 'pdf_spec':
-            parser = PDFParser()
+            parser = self._choose_pdf_parser(document.file_path)
             parsed_content, page_count = parser.parse_with_page_count(document.file_path)
             document.page_count = page_count
+        elif document.file_type in ('dxf_drawing', 'dwg_drawing'):
+            from parsing.dxf_parser import DXFParser
+            parsed_content = DXFParser().parse(document.file_path)
         else:  # docx_spec
             parsed_content = self._parse_docx(document.file_path)
+        logger.info(f"[TIMING][PARSE] {doc_name}: {time.perf_counter() - t0:.2f}s")
 
         # ── Step 2: Group into sections (lightweight — no UUIDs) ──────────────
+        t0 = time.perf_counter()
         sections = self._group_into_sections(parsed_content)
         del parsed_content   # free raw block memory — no longer needed
+        logger.info(f"[TIMING][SECTION_GROUP] {doc_name}: {time.perf_counter() - t0:.2f}s")
 
         total_sections = len(sections)
         total_batches  = max(1, (total_sections + SECTION_BATCH - 1) // SECTION_BATCH)
         logger.info(
-            f"[CHUNK] {document.original_filename}: {total_sections} sections "
+            f"[CHUNK] {doc_name}: {total_sections} sections "
             f"→ {total_batches} streaming batch(es) of up to {SECTION_BATCH}"
         )
 
@@ -600,21 +662,29 @@ class DocumentProcessor:
 
         for batch_num, batch_start in enumerate(range(0, total_sections, SECTION_BATCH), 1):
             batch = sections[batch_start : batch_start + SECTION_BATCH]
+            t_batch = time.perf_counter()
 
+            t0 = time.perf_counter()
             parents, children, chunk_idx = self._build_chunks_for_sections(
                 batch, document, chunk_idx_start=chunk_idx
+            )
+            logger.info(
+                f"[TIMING][BUILD_CHUNKS] {doc_name} batch {batch_num}/{total_batches}: "
+                f"{time.perf_counter() - t0:.2f}s ({len(children)} children)"
             )
             if not children:
                 continue
 
             child_embeddings = self._generate_embeddings([c["text"] for c in children])
+
+            t0 = time.perf_counter()
             self._store_chunks(parents, children, child_embeddings, document)
             total_children += len(children)
 
             logger.info(
-                f"[CHUNK] {document.original_filename} batch {batch_num}/{total_batches}: "
-                f"stored {len(children)} child chunks "
-                f"(running total: {total_children})"
+                f"[TIMING][BATCH] {doc_name} batch {batch_num}/{total_batches}: "
+                f"total {time.perf_counter() - t_batch:.2f}s | "
+                f"running total: {total_children} child chunks"
             )
 
             # Explicitly release this batch to keep peak memory small
@@ -627,17 +697,22 @@ class DocumentProcessor:
         document.num_chunks = total_children
         self.db.commit()
         logger.info(
-            f"[CHUNK] {document.original_filename}: done — "
+            f"[TIMING][DOC_TOTAL] {doc_name}: {time.perf_counter() - t_doc_start:.2f}s — "
             f"{total_children} searchable child chunks"
         )
 
     def _process_boq_document(self, document):
         """Process Excel BOQ — store items in PostgreSQL and embed into Pinecone."""
+        doc_name = document.original_filename
+        t_doc_start = time.perf_counter()
+
+        t0 = time.perf_counter()
         try:
             boq_items = self._parse_excel_boq(document.file_path)
         except Exception as e:
-            logger.warning(f"Skipping BOQ parsing for {document.original_filename}: {e}")
+            logger.warning(f"Skipping BOQ parsing for {doc_name}: {e}")
             boq_items = []
+        logger.info(f"[TIMING][BOQ_PARSE] {doc_name}: {time.perf_counter() - t0:.2f}s ({len(boq_items)} items)")
 
         valid_items = []
         for item in boq_items:
@@ -655,6 +730,7 @@ class DocumentProcessor:
 
         # Build a rich text representation for each item and embed into Pinecone
         if valid_items:
+            t0 = time.perf_counter()
             texts = []
             for item in valid_items:
                 parts = []
@@ -674,6 +750,7 @@ class DocumentProcessor:
                     parts.append(f"Sub-category: {item['sub_category']}")
                 texts.append(" | ".join(parts))
 
+            logger.info(f"[TIMING][BOQ_TEXT_BUILD] {doc_name}: {time.perf_counter() - t0:.2f}s")
             embeddings = self._generate_embeddings(texts)
 
             pinecone_vectors = []
@@ -707,9 +784,12 @@ class DocumentProcessor:
                     },
                 })
 
+            t0 = time.perf_counter()
             PINECONE_BATCH = 100
             for start in range(0, len(pinecone_vectors), PINECONE_BATCH):
                 self.pinecone.upsert(vectors=pinecone_vectors[start: start + PINECONE_BATCH])
+            logger.info(f"[TIMING][BOQ_PINECONE] {doc_name}: {time.perf_counter() - t0:.2f}s ({len(pinecone_vectors)} vectors)")
 
         document.processed = True
         self.db.commit()
+        logger.info(f"[TIMING][BOQ_TOTAL] {doc_name}: {time.perf_counter() - t_doc_start:.2f}s")

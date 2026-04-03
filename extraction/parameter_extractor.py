@@ -1,5 +1,6 @@
 # extraction/parameter_extractor.py
 import json
+import time
 
 from config.parameters import FACADE_PARAMETERS
 from models.document_chunk import DocumentChunk
@@ -263,6 +264,11 @@ Include ALL sources in source_numbers that contain relevant information, not jus
         num_docs: int = 1,
     ) -> List[Dict]:
         semaphore = asyncio.Semaphore(max_concurrent)
+        t_all_start = time.perf_counter()
+        logger.info(
+            f"[TIMING][EXTRACT_ALL] Starting extraction of {len(facade_parameters)} parameters "
+            f"(max_concurrent={max_concurrent}, num_docs={num_docs})"
+        )
 
         tasks = [
             self._extract_single_async(project_id, param, semaphore, num_docs)
@@ -283,6 +289,11 @@ Include ALL sources in source_numbers that contain relevant information, not jus
             if result.get('found'):
                 self._store_extraction(project_id, param_config, result)
 
+        found_count = sum(1 for r in results if r.get('found'))
+        logger.info(
+            f"[TIMING][EXTRACT_ALL] Done — {found_count}/{len(results)} found — "
+            f"total: {time.perf_counter() - t_all_start:.2f}s"
+        )
         return results
 
     async def _extract_single_async(
@@ -293,7 +304,9 @@ Include ALL sources in source_numbers that contain relevant information, not jus
         num_docs: int = 1,
     ) -> Dict:
         async with semaphore:
+            pname = param_config['name']
             loop = asyncio.get_running_loop()
+            t_param_start = time.perf_counter()
             query = f"{param_config['description']} {' '.join(param_config['search_keywords'])}"
 
             # Scale top_k with number of indexed documents so we get good coverage
@@ -301,11 +314,14 @@ Include ALL sources in source_numbers that contain relevant information, not jus
             top_k = min(30, max(10, 5 * num_docs))
 
             # Step 1: Embed query in thread (network call, no SQLAlchemy)
+            t0 = time.perf_counter()
             query_embedding = await loop.run_in_executor(
                 None, lambda: self.embedder.embed([query])[0]
             )
+            logger.info(f"[TIMING][EXTRACT][{pname}] query embed: {time.perf_counter() - t0:.2f}s")
 
             # Step 2: Pinecone search in thread (network call, no SQLAlchemy)
+            t0 = time.perf_counter()
             pinecone_results = await loop.run_in_executor(
                 None, lambda: self.pinecone.query(
                     vector=query_embedding,
@@ -314,17 +330,20 @@ Include ALL sources in source_numbers that contain relevant information, not jus
                     include_metadata=True,
                 )
             )
-
             chunk_ids = [m['id'] for m in pinecone_results['matches']]
-            logger.info(f"[EXTRACT][{param_config['name']}] Pinecone returned {len(chunk_ids)} ids (top_k={top_k})")
+            logger.info(
+                f"[TIMING][EXTRACT][{pname}] Pinecone search: {time.perf_counter() - t0:.2f}s "
+                f"→ {len(chunk_ids)} hits (top_k={top_k})"
+            )
             if not chunk_ids:
-                logger.info(f"[EXTRACT][{param_config['name']}] No Pinecone results → skipping")
-                return {'parameter_name': param_config['name'], 'found': False, 'reason': 'No relevant content found'}
+                logger.info(f"[EXTRACT][{pname}] No Pinecone results → skipping")
+                return {'parameter_name': pname, 'found': False, 'reason': 'No relevant content found'}
 
             scores = {m['id']: m['score'] for m in pinecone_results['matches']}
 
             # Step 3: DB query — use a dedicated per-task session to avoid sharing
             # self.db across concurrent threads (SQLAlchemy sessions are not thread-safe).
+            t0 = time.perf_counter()
             task_session = self.session_factory() if self.session_factory else self.db
             try:
                 child_chunks = (
@@ -333,11 +352,14 @@ Include ALL sources in source_numbers that contain relevant information, not jus
                     .filter(DocumentChunk.pinecone_id.in_(chunk_ids))
                     .all()
                 )
-                logger.info(f"[EXTRACT][{param_config['name']}] DB found {len(child_chunks)} child chunks")
+                logger.info(
+                    f"[TIMING][EXTRACT][{pname}] DB child query: {time.perf_counter() - t0:.2f}s "
+                    f"→ {len(child_chunks)} chunks"
+                )
 
                 if not child_chunks:
-                    logger.info(f"[EXTRACT][{param_config['name']}] 0 DB chunks despite Pinecone hits — filter mismatch?")
-                    return {'parameter_name': param_config['name'], 'found': False, 'reason': 'No chunks found in DB'}
+                    logger.info(f"[EXTRACT][{pname}] 0 DB chunks despite Pinecone hits — filter mismatch?")
+                    return {'parameter_name': pname, 'found': False, 'reason': 'No chunks found in DB'}
 
                 # ── Hierarchical context expansion ────────────────────────────
                 # For each child chunk that has a parent (section-level chunk), load
@@ -348,6 +370,7 @@ Include ALL sources in source_numbers that contain relevant information, not jus
                 ]
                 parent_map: Dict = {}
                 if parent_ids:
+                    t0 = time.perf_counter()
                     parent_rows = (
                         task_session.query(DocumentChunk)
                         .options(joinedload(DocumentChunk.document))
@@ -356,7 +379,8 @@ Include ALL sources in source_numbers that contain relevant information, not jus
                     )
                     parent_map = {p.chunk_id: p for p in parent_rows}
                     logger.info(
-                        f"[EXTRACT][{param_config['name']}] Loaded {len(parent_map)} parent sections"
+                        f"[TIMING][EXTRACT][{pname}] DB parent query: {time.perf_counter() - t0:.2f}s "
+                        f"→ {len(parent_map)} parents"
                     )
 
                 # Build deduplicated context list — one entry per unique parent section
@@ -384,22 +408,29 @@ Include ALL sources in source_numbers that contain relevant information, not jus
             context = self._build_context(chunk_dicts, max_sources=max_sources)
 
             # Step 4: LLM call in thread — only plain strings, no SQLAlchemy
+            t0 = time.perf_counter()
             try:
                 response_text = await loop.run_in_executor(
                     None, self._call_llm, param_config, context
                 )
-                logger.info(f"[EXTRACT][{param_config['name']}] LLM raw response: {response_text}")
+                logger.info(
+                    f"[TIMING][EXTRACT][{pname}] LLM call: {time.perf_counter() - t0:.2f}s"
+                )
             except Exception as e:
-                logger.error(f"[EXTRACT][{param_config['name']}] LLM call failed: {e}")
-                return {'parameter_name': param_config['name'], 'found': False, 'reason': f'LLM error: {e}'}
+                logger.error(f"[EXTRACT][{pname}] LLM call failed: {e}")
+                return {'parameter_name': pname, 'found': False, 'reason': f'LLM error: {e}'}
 
             result = self._parse_llm_response(response_text, param_config, chunk_dicts)
-            logger.info(f"[EXTRACT][{param_config['name']}] parsed result found={result.get('found')} value={result.get('value')}")
+            logger.info(
+                f"[TIMING][EXTRACT][{pname}] total: {time.perf_counter() - t_param_start:.2f}s "
+                f"| found={result.get('found')} value={result.get('value')}"
+            )
             return result
 
     # ── Store to DB ───────────────────────────────────────────────────────────
 
     def _store_extraction(self, project_id: str, param_config: Dict, extraction: Dict):
+        t0 = time.perf_counter()
         source_meta = extraction.get('source_metadata', {})
         all_pages = extraction.get('all_pages', [])
 
@@ -450,7 +481,10 @@ Include ALL sources in source_numbers that contain relevant information, not jus
                 store_session.add(record)
 
             store_session.commit()
-            logger.info(f"[STORE] Saved parameter '{param_config['name']}' value='{extraction.get('value')}'")
+            logger.info(
+                f"[TIMING][STORE] '{param_config['name']}': {time.perf_counter() - t0:.2f}s "
+                f"value='{extraction.get('value')}'"
+            )
         except Exception as e:
             store_session.rollback()
             logger.error(f"[STORE] Failed to save '{param_config['name']}': {e}")

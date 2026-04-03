@@ -1,6 +1,10 @@
 # main.py
 import asyncio
+import contextvars
+import logging as _logging_mod
 import os
+import re as _re
+import time as _time_mod
 import traceback
 import aiofiles
 from dotenv import load_dotenv
@@ -51,6 +55,86 @@ app.add_middleware(
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+# ── Per-project timing store ──────────────────────────────────────────────────
+# Keyed by project_id string → list of timing dicts.
+# Populated by _TimingHandler below; read by the /timings endpoint.
+_project_timings: dict[str, list] = {}
+
+# ContextVar that _TimingHandler reads to know which project is active.
+# Set at the top of _run_pipeline and _run_extraction.
+_timing_project_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "_timing_project_id", default=None
+)
+
+_TIMING_RE = _re.compile(
+    r"\[TIMING\]\[(?P<tag>[^\]]+)\](?:\[(?P<sub>[^\]]+)\])?\s+(?P<rest>.+?):\s+(?P<dur>\d+\.\d+)s"
+)
+
+# Human-readable labels for each timing tag
+_TAG_LABELS = {
+    "PARSE":         "Document parsed",
+    "SECTION_GROUP": "Sections grouped",
+    "BUILD_CHUNKS":  "Chunks built",
+    "EMBED":         "Embeddings generated",
+    "STORE":         "Chunks stored to DB + Pinecone",
+    "BATCH":         "Batch complete",
+    "DOC_TOTAL":     "Document indexed (end-to-end)",
+    "BOQ_PARSE":     "BOQ parsed",
+    "BOQ_TEXT_BUILD":"BOQ text prepared",
+    "BOQ_PINECONE":  "BOQ uploaded to Pinecone",
+    "BOQ_TOTAL":     "BOQ document indexed (end-to-end)",
+    "EXTRACT_ALL":   "Full extraction round",
+    "EXTRACT":       "Parameter extracted",
+    "PIPELINE":      "Pipeline step",
+}
+
+# Tags to surface as "summary" (high-level) vs detailed
+_SUMMARY_TAGS = {"DOC_TOTAL", "BOQ_TOTAL", "EXTRACT_ALL", "PIPELINE"}
+
+
+class _TimingHandler(_logging_mod.Handler):
+    """Capture [TIMING] log records and store them per active project."""
+
+    def emit(self, record: _logging_mod.LogRecord):
+        project_id = _timing_project_id.get()
+        if not project_id:
+            return
+        msg = record.getMessage()
+        if "[TIMING]" not in msg:
+            return
+        m = _TIMING_RE.search(msg)
+        if not m:
+            return
+        tag  = m.group("tag")
+        sub  = m.group("sub")    # e.g. parameter name for EXTRACT
+        rest = m.group("rest").strip()
+        dur  = float(m.group("dur"))
+        label = _TAG_LABELS.get(tag, tag)
+        if sub:
+            label = f"{label}: {sub}"
+        entry = {
+            "tag":      tag,
+            "sub":      sub,
+            "label":    label,
+            "detail":   rest,
+            "duration": round(dur, 2),
+            "ts":       _time_mod.time(),
+            "summary":  tag in _SUMMARY_TAGS,
+        }
+        _project_timings.setdefault(project_id, []).append(entry)
+
+
+_timing_handler = _TimingHandler()
+_timing_handler.setLevel(_logging_mod.DEBUG)
+
+# Attach to every logger that emits [TIMING] records
+for _logger_name in (
+    "processing.document_processor",
+    "extraction.parameter_extractor",
+    "pipeline",
+):
+    _logging_mod.getLogger(_logger_name).addHandler(_timing_handler)
 
 # ── Database ──────────────────────────────────────────────────────────────────
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://poc_user:poc_password@localhost:5432/tender_poc")
@@ -171,8 +255,12 @@ def classify_file_type(filename: str) -> str:
         return "docx_spec"
     elif ext in [".xlsx", ".xls"]:
         return "excel_boq"
+    elif ext == ".dxf":
+        return "dxf_drawing"
+    elif ext == ".dwg":
+        return "dwg_drawing"
     else:
-        raise ValueError(f"Unsupported file type: {filename}")
+        raise ValueError(f"Unsupported file type: {filename}. Supported: PDF, DOCX, XLSX, DXF, DWG")
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
@@ -283,6 +371,10 @@ async def _run_pipeline(project_id: uuid.UUID):
     The frontend's 3-second polling immediately surfaces these partial results,
     showing "Scanning document X (2/4)…" while later docs are still processing.
     """
+    import time as _time
+    _timing_project_id.set(str(project_id))
+    _project_timings[str(project_id)] = []   # reset on each new run
+    t_pipeline_start = _time.perf_counter()
     _pipeline_log.info(f"[PIPELINE] Starting for project {project_id}")
     db = SessionLocal()
     try:
@@ -296,7 +388,7 @@ async def _run_pipeline(project_id: uuid.UUID):
             Document.processed == False,
         ).all()
 
-        spec_docs = [d for d in all_docs if d.file_type in ['pdf_spec', 'docx_spec']]
+        spec_docs = [d for d in all_docs if d.file_type in ['pdf_spec', 'docx_spec', 'dxf_drawing', 'dwg_drawing']]
         boq_docs  = [d for d in all_docs if d.file_type == 'excel_boq']
         total_spec = len(spec_docs)
         _pipeline_log.info(
@@ -315,9 +407,14 @@ async def _run_pipeline(project_id: uuid.UUID):
             project.pipeline_step = f"Processing BOQ: {doc.original_filename}"
             doc.processing_status = "processing"
             db.commit()
+            t_boq = _time.perf_counter()
             try:
                 processor._process_boq_document(doc)
                 doc.processing_status = "completed"
+                _pipeline_log.info(
+                    f"[TIMING][PIPELINE] BOQ {doc.original_filename}: "
+                    f"{_time.perf_counter() - t_boq:.2f}s"
+                )
             except Exception as e:
                 _pipeline_log.error(f"[PIPELINE] BOQ failed {doc.original_filename}: {e}")
                 doc.processing_status = "failed"
@@ -333,11 +430,16 @@ async def _run_pipeline(project_id: uuid.UUID):
             doc.processing_status = "processing"
             db.commit()
 
+            t_doc = _time.perf_counter()
             try:
                 processor._process_specification_document(doc)
                 doc.processing_status = "indexed"
                 indexed_spec_count += 1
                 db.commit()
+                _pipeline_log.info(
+                    f"[TIMING][PIPELINE] Parse+embed {doc.original_filename} "
+                    f"({i}/{total_spec}): {_time.perf_counter() - t_doc:.2f}s"
+                )
             except Exception as e:
                 _pipeline_log.error(f"[PIPELINE] Parse failed {doc.original_filename}: {e}")
                 doc.processing_status = "failed"
@@ -348,7 +450,12 @@ async def _run_pipeline(project_id: uuid.UUID):
             # ── B: Wait for this doc's vectors to be queryable in Pinecone ────
             project.pipeline_step = f"Indexing {doc.original_filename} ({i}/{total_spec})…"
             db.commit()
+            t_wait = _time.perf_counter()
             await _wait_for_pinecone_doc(str(project_id), str(doc.document_id), timeout=90)
+            _pipeline_log.info(
+                f"[TIMING][PIPELINE] Pinecone ready wait {doc.original_filename}: "
+                f"{_time.perf_counter() - t_wait:.2f}s"
+            )
 
             # ── C: Extract all 27 params with all indexed docs so far ─────────
             project.pipeline_step = (
@@ -364,6 +471,7 @@ async def _run_pipeline(project_id: uuid.UUID):
                 db_session=db,
                 session_factory=SessionLocal,
             )
+            t_extract = _time.perf_counter()
             extractions = await extractor.extract_all_parameters_async(
                 str(project_id),
                 facade_parameters=FACADE_PARAMETERS,
@@ -372,7 +480,8 @@ async def _run_pipeline(project_id: uuid.UUID):
             )
             found_count = len([e for e in extractions if e.get("found")])
             _pipeline_log.info(
-                f"[PIPELINE] After {i}/{total_spec} docs: "
+                f"[TIMING][PIPELINE] Extraction after doc {i}/{total_spec}: "
+                f"{_time.perf_counter() - t_extract:.2f}s — "
                 f"{found_count}/{len(extractions)} params found"
             )
 
@@ -384,6 +493,10 @@ async def _run_pipeline(project_id: uuid.UUID):
         project.pipeline_step = None
         project.processing_completed_at = datetime.now()
         db.commit()
+        _pipeline_log.info(
+            f"[TIMING][PIPELINE] TOTAL for project {project_id}: "
+            f"{_time.perf_counter() - t_pipeline_start:.2f}s"
+        )
         _pipeline_log.info(f"[PIPELINE] Completed for project {project_id}")
 
     except Exception as e:
@@ -445,6 +558,8 @@ async def re_extract_parameters(
         raise HTTPException(status_code=404, detail="Project not found")
 
     async def _run_extraction(pid: uuid.UUID):
+        _timing_project_id.set(str(pid))
+        _project_timings[str(pid)] = []   # reset on re-extract
         _pipeline_log.info(f"[RE-EXTRACT] Starting for project {pid}")
         _db = SessionLocal()
         try:
@@ -583,6 +698,34 @@ async def get_extracted_parameters(project_id: uuid.UUID, db: Session = Depends(
         "parameters": results,
         "total_extracted": len(results),
         "documents": documents_info,
+    }
+
+
+@app.get("/projects/{project_id}/timings")
+async def get_project_timings(project_id: uuid.UUID, db: Session = Depends(get_db)):
+    """Return captured [TIMING] log entries for a project, split into summary and details."""
+    project = db.query(Project).filter(Project.project_id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    entries = _project_timings.get(str(project_id), [])
+    summary = [e for e in entries if e["summary"]]
+    details = [e for e in entries if not e["summary"]]
+
+    # Derive total pipeline duration from the PIPELINE TOTAL entry if present
+    total = next(
+        (e["duration"] for e in reversed(summary)
+         if e["tag"] == "PIPELINE" and "TOTAL" in e["detail"]),
+        None,
+    )
+
+    return {
+        "project_id":      str(project_id),
+        "processing_status": project.processing_status,
+        "total_seconds":   total,
+        "summary":         summary,
+        "details":         details,
+        "all":             entries,
     }
 
 
