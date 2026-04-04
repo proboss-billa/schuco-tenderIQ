@@ -13,6 +13,7 @@ from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_excep
 from google import genai
 from google.genai import types
 import os
+import anthropic
 
 from models.boq_item import BOQItem
 from models.document import Document
@@ -57,6 +58,7 @@ class DocumentProcessor:
         self.pinecone = pinecone_index
         self.embedder = embedding_client
         self.gemini_llm_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+        self.anthropic_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 
 
@@ -558,16 +560,14 @@ class DocumentProcessor:
         {context}
         """
 
-        response = self.gemini_llm_client.models.generate_content(
-            model="gemini-3-flash-preview",
-            config=types.GenerateContentConfig(
-                system_instruction=system_instr,
-                response_mime_type="application/json",
-                temperature=0.1,
-            ),
-            contents=prompt
+        response = self.anthropic_client.messages.create(
+            model="claude-opus-4-20250514",
+            max_tokens=4096,
+            temperature=0.1,
+            system=system_instr,
+            messages=[{"role": "user", "content": prompt}],
         )
-        raw_response = response.text
+        raw_response = response.content[0].text
 
         # ── parse & persist ───────────────────────────────────────────────────
         try:
