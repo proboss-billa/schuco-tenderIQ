@@ -219,6 +219,15 @@ def on_startup():
         conn.execute(text(
             "ALTER TABLE projects ADD COLUMN IF NOT EXISTS pipeline_step TEXT"
         ))
+        # ── Project type (commercial / residential) and updated_at ────────────
+        conn.execute(text(
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS "
+            "project_type VARCHAR(20) NOT NULL DEFAULT 'commercial'"
+        ))
+        conn.execute(text(
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS "
+            "updated_at TIMESTAMP DEFAULT now()"
+        ))
         conn.commit()
 
 # ── Pinecone ──────────────────────────────────────────────────────────────────
@@ -297,8 +306,11 @@ def list_projects(db: Session = Depends(get_db)):
         {
             "project_id": str(p.project_id),
             "project_name": p.project_name,
+            "project_type": getattr(p, "project_type", "commercial") or "commercial",
             "processing_status": p.processing_status,
             "created_at": p.created_at.isoformat() if p.created_at else None,
+            "updated_at": (p.updated_at.isoformat() if getattr(p, "updated_at", None) else
+                           p.created_at.isoformat() if p.created_at else None),
         }
         for p in projects
     ]
@@ -308,12 +320,19 @@ def list_projects(db: Session = Depends(get_db)):
 async def create_project(
     project_name: str = Form(...),
     project_description: str = Form(None),
+    project_type: str = Form("commercial"),
     files: List[UploadFile] = File(...),
     db: Session = Depends(get_db),
 ):
+    # Validate project_type
+    p_type = project_type.lower().strip() if project_type else "commercial"
+    if p_type not in ("commercial", "residential"):
+        p_type = "commercial"
+
     project = Project(
         project_name=project_name,
         project_description=project_description,
+        project_type=p_type,
         processing_status="uploaded",
     )
     db.add(project)
@@ -346,6 +365,7 @@ async def create_project(
     return {
         "project_id": str(project.project_id),
         "project_name": project.project_name,
+        "project_type": project.project_type,
         "documents_uploaded": len(saved_documents),
         "status": "uploaded",
     }
@@ -888,6 +908,7 @@ async def get_extracted_parameters(project_id: uuid.UUID, db: Session = Depends(
 
     return {
         "project_id": str(project_id),
+        "project_type": getattr(project, "project_type", "commercial") or "commercial",
         "processing_status": project.processing_status,
         "pipeline_step": getattr(project, 'pipeline_step', None),
         "parameters": results,
