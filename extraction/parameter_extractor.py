@@ -230,12 +230,19 @@ class ParameterExtractor:
     # ══════════════════════════════════════════════════════════════════════════
 
     def _fetch_all_parent_chunks(self, project_id: str) -> List[Dict]:
-        """Fetch ALL level-0 parent chunks for a project, ordered by document + page.
+        """Fetch ALL parent chunks for a project from ALL document types.
 
-        These contain full section text (~3000 words each) — the same content
-        the user would paste into Claude Web. No Pinecone search needed.
+        Combines:
+        - Level-0 parent chunks from spec/drawing PDFs (full section text)
+        - Level-1 chunks from BOQ/spreadsheets (no parent hierarchy)
+        - Fallback to level-1 children if no level-0 parents exist
+
+        This ensures ALL document types contribute to full-context extraction.
         """
-        parents = (
+        from models.document import Document
+
+        # 1. Fetch level-0 parents (specs, drawings, docx)
+        spec_parents = (
             self.db.query(DocumentChunk)
             .options(joinedload(DocumentChunk.document))
             .filter(
@@ -245,10 +252,11 @@ class ParameterExtractor:
             .order_by(DocumentChunk.document_id, DocumentChunk.page_number)
             .all()
         )
-        if not parents:
+
+        if not spec_parents:
             # Fallback: if no level-0 parents exist (legacy data), fetch all level-1 children
             logger.warning(f"[FULL_CONTEXT] No level-0 parents found — falling back to level-1 children")
-            parents = (
+            spec_parents = (
                 self.db.query(DocumentChunk)
                 .options(joinedload(DocumentChunk.document))
                 .filter(
@@ -258,7 +266,45 @@ class ParameterExtractor:
                 .order_by(DocumentChunk.document_id, DocumentChunk.page_number)
                 .all()
             )
-        return [self._chunk_to_dict(p, score=1.0) for p in parents]
+            # In fallback mode, BOQ chunks are already included (all are level-1)
+            return [self._chunk_to_dict(p, score=1.0) for p in spec_parents]
+
+        # 2. Fetch BOQ/spreadsheet chunks (these have no level-0 parents)
+        boq_doc_ids = (
+            self.db.query(Document.document_id)
+            .filter(
+                Document.project_id == project_id,
+                Document.file_type.in_(["excel_boq", "csv_boq"]),
+            )
+            .all()
+        )
+        boq_doc_ids = [d[0] for d in boq_doc_ids]
+
+        boq_chunks = []
+        if boq_doc_ids:
+            boq_chunks = (
+                self.db.query(DocumentChunk)
+                .options(joinedload(DocumentChunk.document))
+                .filter(
+                    DocumentChunk.project_id == project_id,
+                    DocumentChunk.document_id.in_(boq_doc_ids),
+                )
+                .order_by(DocumentChunk.document_id, DocumentChunk.chunk_index)
+                .all()
+            )
+            logger.info(f"[FULL_CONTEXT] Including {len(boq_chunks)} BOQ chunks from {len(boq_doc_ids)} spreadsheet(s)")
+
+        # 3. Combine: spec parents first, then BOQ chunks
+        all_chunks = spec_parents + boq_chunks
+
+        # Log document coverage
+        doc_types = {}
+        for c in all_chunks:
+            ft = c.document.file_type if c.document else "unknown"
+            doc_types[ft] = doc_types.get(ft, 0) + 1
+        logger.info(f"[FULL_CONTEXT] Document coverage: {doc_types}")
+
+        return [self._chunk_to_dict(p, score=1.0) for p in all_chunks]
 
     @staticmethod
     def _estimate_tokens(text: str) -> int:

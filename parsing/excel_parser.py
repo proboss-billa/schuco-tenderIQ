@@ -84,7 +84,7 @@ class ExcelBOQParser:
                         all_items.extend(items)
 
             # ── Always produce text chunks (fallback + supplement) ───────
-            chunks = self._sheet_to_text_chunks(raw_df, sheet_name)
+            chunks = self._sheet_to_text_chunks(raw_df, sheet_name, header_row=header_row)
             all_text_chunks.extend(chunks)
 
         logger.info(
@@ -237,17 +237,36 @@ class ExcelBOQParser:
         df: pd.DataFrame,
         sheet_name: str,
         max_rows_per_chunk: int = 25,
+        header_row: Optional[int] = None,
     ) -> List[str]:
         """Convert a raw DataFrame to text chunks for embedding.
 
         Groups rows into chunks of *max_rows_per_chunk*.  Each chunk is a
-        readable text block: ``Sheet: <name> | Row 5: val1 | val2 | val3``.
+        readable text block with column headers for context.
         Empty rows are skipped.
         """
         chunks: List[str] = []
         lines: List[str] = []
 
-        for idx in range(len(df)):
+        # Detect column headers for context
+        col_headers = None
+        if header_row is not None and header_row < len(df):
+            header_cells = []
+            for val in df.iloc[header_row]:
+                s = str(val).strip()
+                if s and s.lower() not in ("nan", "none", ""):
+                    header_cells.append(s)
+            if header_cells:
+                col_headers = header_cells
+
+        # Build column header line for prepending to each chunk
+        header_line = ""
+        if col_headers:
+            header_line = f"Columns: {' | '.join(col_headers)}\n"
+
+        start_row = (header_row + 1) if header_row is not None else 0
+
+        for idx in range(start_row, len(df)):
             cells = []
             for val in df.iloc[idx]:
                 s = str(val).strip()
@@ -256,16 +275,26 @@ class ExcelBOQParser:
             if not cells:
                 continue
 
-            lines.append(f"Row {idx + 1}: {' | '.join(cells)}")
+            # If we have column headers, pair values with column names
+            if col_headers and len(cells) <= len(col_headers):
+                paired = []
+                for ci, cell_val in enumerate(cells):
+                    if ci < len(col_headers):
+                        paired.append(f"{col_headers[ci]}: {cell_val}")
+                    else:
+                        paired.append(cell_val)
+                lines.append(f"Row {idx + 1}: {' | '.join(paired)}")
+            else:
+                lines.append(f"Row {idx + 1}: {' | '.join(cells)}")
 
             if len(lines) >= max_rows_per_chunk:
-                chunk_text = f"Sheet: {sheet_name}\n" + "\n".join(lines)
+                chunk_text = f"Sheet: {sheet_name}\n{header_line}" + "\n".join(lines)
                 chunks.append(chunk_text)
                 lines = []
 
         # Flush remaining
         if lines:
-            chunk_text = f"Sheet: {sheet_name}\n" + "\n".join(lines)
+            chunk_text = f"Sheet: {sheet_name}\n{header_line}" + "\n".join(lines)
             chunks.append(chunk_text)
 
         return chunks
