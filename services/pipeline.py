@@ -135,7 +135,7 @@ async def _run_pipeline_inner(project_id: uuid.UUID, model_key: str = None):
             db.commit()
 
         # ── Phase 1: Parse all spec docs in PARALLEL ─────────────────────────
-        DOC_CONCURRENCY = 3
+        DOC_CONCURRENCY = 6
         _doc_semaphore = asyncio.Semaphore(DOC_CONCURRENCY)
         _progress_lock = asyncio.Lock()
         _completed_count = [0]

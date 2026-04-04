@@ -36,14 +36,14 @@ logger = logging.getLogger(__name__)
 # Hierarchical chunking sizes (words, not tokens — a reasonable proxy)
 CHILD_SIZE        = 200   # level-1 child chunk: ~200 words, precise for retrieval
 PARENT_MAX_WORDS  = 3000  # level-0 parent cap: long sections are split here
-EMBED_BATCH_SIZE  = 64    # max texts per embedding API call
+EMBED_BATCH_SIZE  = 100   # max texts per embedding API call (Google API supports 100)
 PARAM_BATCH_SIZE  = 1800  # chunks sent per LLM parameter-extraction call
 
 # Streaming processing: number of sections processed per batch.
 # Each section typically contributes 1 parent + a few children.
-# At SECTION_BATCH=50 with ~3 children/section → ~150 child chunks per DB commit.
+# At SECTION_BATCH=100 with ~3 children/section → ~300 child chunks per DB commit.
 # This keeps peak memory per batch small regardless of document size.
-SECTION_BATCH = 50
+SECTION_BATCH = 100
 
 # Legacy constants kept for reference — no longer used in new pipeline
 CHUNK_SIZE    = 512
@@ -325,7 +325,7 @@ class DocumentProcessor:
         Call the embedding client in batches to avoid hitting API size limits.
         Uses parallel threads for 3+ batches to speed up large documents.
         """
-        EMBED_WORKERS = 3
+        EMBED_WORKERS = 5
         t0 = time.perf_counter()
 
         batches = []

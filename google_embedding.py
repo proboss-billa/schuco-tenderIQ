@@ -6,7 +6,7 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-BATCH_SIZE = 64        # Google batchEmbedContents supports up to 100; 64 is safe
+BATCH_SIZE = 100       # Google batchEmbedContents max — matched to EMBED_BATCH_SIZE
 REQUEST_TIMEOUT = 120  # seconds — generous for large batches over slow connections
 MAX_RETRIES = 4        # retry on 429 / 5xx before giving up
 RETRY_BACKOFF = [2, 5, 15, 30]  # seconds between attempts

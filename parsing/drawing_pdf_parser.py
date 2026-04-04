@@ -36,7 +36,9 @@ RENDER_DPI = 200
 MAX_VISION_PAGES = 150
 # Parallel vision processing
 VISION_BATCH_SIZE = 10   # pages rendered at once (memory guard: ~10 PNGs × 3MB = ~30MB)
-VISION_WORKERS = 8       # concurrent Vision API calls within a batch
+VISION_WORKERS = 10      # concurrent Vision API calls within a batch
+# Parallel table extraction (pdfplumber is slow per page, ~200-500ms)
+TABLE_WORKERS = 4        # concurrent pdfplumber extract_tables calls
 # Vision model — must be kept in sync with available Gemini models
 VISION_MODEL = "gemini-2.5-flash"
 # Skip pdfplumber table extraction on very large PDFs (too slow)
@@ -178,64 +180,44 @@ class DrawingPDFParser:
                 f"{len(vision_page_indices)} vision pages, {vision_skipped} skipped"
             )
 
-            # ── Phase 2: Process text pages (spans + tables) ────────────────
-            plumb_pdf = None
+            # ── Phase 2: Process text pages (spans + parallel tables) ───────
+            # Text span extraction via fitz is fast (~1ms/page) and must be
+            # sequential (tracks current_section/subsection state).
+            # Table extraction via pdfplumber is SLOW (~200-500ms/page) and
+            # stateless — parallelized with ThreadPoolExecutor.
+
+            for page_idx in text_page_indices:
+                fitz_page = fitz_doc[page_idx]
+                blocks, current_section, current_subsection = _extract_text_spans(
+                    fitz_page, page_idx + 1, blocks, current_section, current_subsection,
+                    source_type="pdf_spec",
+                )
+
+            # Record section context per page for table blocks
+            _page_sections = {}
+            _cur_sec, _cur_sub = None, None
+            for b in blocks:
+                pg = b.get("page")
+                if b.get("is_heading"):
+                    if b.get("font_size", 0) > 14:
+                        _cur_sec = b["text"]
+                        _cur_sub = None
+                    else:
+                        _cur_sub = b["text"]
+                if pg:
+                    _page_sections[pg] = (_cur_sec, _cur_sub)
+
+            # Parallel table extraction
             if not skip_tables and text_page_indices:
-                try:
-                    import pdfplumber
-                    plumb_pdf = pdfplumber.open(pdf_path)
-                except Exception as e:
-                    logger.warning(f"[HYBRID_PDF] pdfplumber failed to open — tables skipped: {e}")
-
-            try:
-                for page_idx in text_page_indices:
-                    page_num = page_idx + 1
-                    fitz_page = fitz_doc[page_idx]
-
-                    # Text spans
-                    blocks, current_section, current_subsection = _extract_text_spans(
-                        fitz_page, page_num, blocks, current_section, current_subsection,
-                        source_type="pdf_spec",
+                table_blocks = _extract_tables_parallel(
+                    pdf_path, text_page_indices, _page_sections
+                )
+                blocks.extend(table_blocks)
+                if table_blocks:
+                    logger.info(
+                        f"[HYBRID_PDF] Extracted {len(table_blocks)} table blocks "
+                        f"from {len(text_page_indices)} text pages"
                     )
-
-                    # Table extraction via pdfplumber
-                    if plumb_pdf and page_idx < len(plumb_pdf.pages):
-                        try:
-                            plumb_page = plumb_pdf.pages[page_idx]
-                            found = plumb_page.find_tables()
-                            if found:
-                                tables = plumb_page.extract_tables() or []
-                                for table_idx, table in enumerate(tables):
-                                    if not table:
-                                        continue
-                                    rows_text = [
-                                        " | ".join(
-                                            cell.strip() if cell else ""
-                                            for cell in row
-                                        )
-                                        for row in table
-                                    ]
-                                    table_text = "\n".join(rows_text).strip()
-                                    if table_text:
-                                        blocks.append({
-                                            "type":        "table",
-                                            "text":        table_text,
-                                            "page":        page_num,
-                                            "section":     current_section,
-                                            "subsection":  current_subsection,
-                                            "font_size":   None,
-                                            "is_heading":  False,
-                                            "table_index": table_idx,
-                                            "source_type": "pdf_spec",
-                                        })
-                        except Exception as e:
-                            logger.warning(f"[HYBRID_PDF] Table extraction failed page {page_num}: {e}")
-            finally:
-                if plumb_pdf:
-                    try:
-                        plumb_pdf.close()
-                    except Exception:
-                        pass
 
             # ── Phase 3: Process vision pages in parallel batches ────────────
             vision_results: Dict[int, Tuple[str, str]] = {}  # idx → (page_type, text)
@@ -365,6 +347,82 @@ class DrawingPDFParser:
             ),
         )
         return response.text or ""
+
+
+def _extract_tables_parallel(
+    pdf_path: str,
+    page_indices: List[int],
+    page_sections: Dict[int, tuple],
+) -> List[Dict]:
+    """Extract tables from multiple pages in parallel using pdfplumber.
+
+    pdfplumber's find_tables() + extract_tables() is the slowest per-page
+    operation (~200-500ms/page). Since each page is independent, we
+    parallelize across TABLE_WORKERS threads.
+
+    Returns table blocks sorted by page number.
+    """
+    try:
+        import pdfplumber
+    except ImportError:
+        logger.warning("[HYBRID_PDF] pdfplumber not installed — tables skipped")
+        return []
+
+    def _extract_page_tables(page_idx: int) -> List[Dict]:
+        """Extract tables from a single page. Thread-safe (each opens its own PDF)."""
+        page_num = page_idx + 1
+        try:
+            # Each thread opens its own pdfplumber instance (thread-safe)
+            with pdfplumber.open(pdf_path) as plumb:
+                if page_idx >= len(plumb.pages):
+                    return []
+                plumb_page = plumb.pages[page_idx]
+                found = plumb_page.find_tables()
+                if not found:
+                    return []
+
+                tables = plumb_page.extract_tables() or []
+                section, subsection = page_sections.get(page_num, (None, None))
+                results = []
+                for table_idx, table in enumerate(tables):
+                    if not table:
+                        continue
+                    rows_text = [
+                        " | ".join(cell.strip() if cell else "" for cell in row)
+                        for row in table
+                    ]
+                    table_text = "\n".join(rows_text).strip()
+                    if table_text:
+                        results.append({
+                            "type":        "table",
+                            "text":        table_text,
+                            "page":        page_num,
+                            "section":     section,
+                            "subsection":  subsection,
+                            "font_size":   None,
+                            "is_heading":  False,
+                            "table_index": table_idx,
+                            "source_type": "pdf_spec",
+                        })
+                return results
+        except Exception as e:
+            logger.warning(f"[HYBRID_PDF] Table extraction failed page {page_num}: {e}")
+            return []
+
+    all_table_blocks = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=TABLE_WORKERS) as executor:
+        futures = {
+            executor.submit(_extract_page_tables, idx): idx
+            for idx in page_indices
+        }
+        for future in concurrent.futures.as_completed(futures):
+            result = future.result()
+            if result:
+                all_table_blocks.extend(result)
+
+    # Sort by page number for consistent ordering
+    all_table_blocks.sort(key=lambda b: (b["page"], b.get("table_index", 0)))
+    return all_table_blocks
 
 
 def _parse_vision_response(raw_text: str) -> Tuple[str, str]:
