@@ -20,7 +20,7 @@ import asyncio
 from typing import Dict, List, Optional
 
 # ── Constants ────────────────────────────────────────────────────────────────
-BATCH_SIZE       = 8     # params per LLM call
+BATCH_SIZE       = 15    # params per LLM call (was 8; larger batches = fewer calls)
 SCORE_THRESHOLD  = 0.10  # discard Pinecone hits below this relevance score
 MODEL            = "gemini-3-flash-preview"
 
@@ -34,7 +34,7 @@ def _get_llm_semaphore() -> asyncio.Semaphore:
     """Return module-level LLM semaphore, creating it on first call in the running loop."""
     global _LLM_SEMAPHORE
     if _LLM_SEMAPHORE is None:
-        _LLM_SEMAPHORE = asyncio.Semaphore(8)
+        _LLM_SEMAPHORE = asyncio.Semaphore(14)
     return _LLM_SEMAPHORE
 
 
@@ -554,47 +554,12 @@ If found=false, explanation must clearly state: what terms were searched, what (
 
             results = self._parse_batch_response(response_text, batch_params, chunk_dicts)
 
-            # ── Targeted retry for not-found params (concurrent) ─────────────
-            # The broad combined query may miss niche params. Give each not-found
-            # param its own focused search + single-param LLM call, all in parallel.
-            not_found = [(p, r) for p, r in zip(batch_params, results) if not r.get('found')]
+            # Log not-found params (no retry — user can re-extract individually)
+            not_found = [r.get('parameter_name') for r in results if not r.get('found')]
             if not_found:
                 logger.info(
-                    f"[BATCH] {len(not_found)} not-found in batch — retrying concurrently: "
-                    f"{[p['name'] for p, _ in not_found]}"
+                    f"[BATCH] {len(not_found)} not-found in batch (no retry): {not_found}"
                 )
-
-                _retry_sem = asyncio.Semaphore(4)  # max 4 retries concurrent per batch
-
-                async def _retry_one(param: Dict):
-                    async with _retry_sem:
-                        try:
-                            focused_query = f"{param['display_name']} {' '.join(param['search_keywords'][:6])}"
-                            # Use this param's own source_types for a tighter retry search
-                            param_types = param.get('source_types') or None
-                            focused_chunks = await self._search_pinecone_async(
-                                loop, focused_query, project_id, top_k=12, file_types=param_types
-                            )
-                            if focused_chunks:
-                                focused_context = self._build_context(focused_chunks, max_sources=6)
-                                async with _get_llm_semaphore():
-                                    retry_text = await asyncio.wait_for(
-                                        loop.run_in_executor(None, self._call_llm, param, focused_context),
-                                        timeout=90.0,
-                                    )
-                                retry_result = self._parse_llm_response(retry_text, param, focused_chunks)
-                                if retry_result.get('found'):
-                                    logger.info(f"[BATCH][RETRY] {param['name']} → found on retry ✓")
-                                    return param['name'], retry_result
-                        except Exception as e:
-                            logger.warning(f"[BATCH][RETRY] {param['name']} retry failed: {e}")
-                    return param['name'], None
-
-                retry_outcomes = await asyncio.gather(*[_retry_one(p) for p, _ in not_found])
-                for pname, retry_result in retry_outcomes:
-                    if retry_result is not None:
-                        idx = next(j for j, r in enumerate(results) if r.get('parameter_name') == pname)
-                        results[idx] = retry_result
 
             logger.info(
                 f"[TIMING][BATCH] {batch_names[0]}…{batch_names[-1]} "

@@ -629,7 +629,7 @@ async def _run_pipeline_inner(project_id: uuid.UUID):
             extractions = await extractor.extract_all_parameters_async(
                 str(project_id),
                 facade_parameters=filtered_params,
-                max_concurrent=6,
+                max_concurrent=10,
                 num_docs=total_indexed,
             )
             found_count = len([e for e in extractions if e.get("found")])
@@ -751,7 +751,7 @@ async def re_extract_parameters(
             extractions = await extractor.extract_all_parameters_async(
                 str(pid),
                 facade_parameters=filtered_params,
-                max_concurrent=5,
+                max_concurrent=10,
                 num_docs=max(1, doc_count),
             )
             found_count = len([e for e in extractions if e.get("found")])
@@ -951,7 +951,7 @@ async def reprocess_document(
             )
             await extractor.extract_all_parameters_async(
                 str(pid), facade_parameters=filtered_params,
-                max_concurrent=5, num_docs=max(1, doc_count),
+                max_concurrent=10, num_docs=max(1, doc_count),
             )
 
             if _proj:
