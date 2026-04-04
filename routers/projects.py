@@ -1,12 +1,13 @@
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import aiofiles
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends, BackgroundTasks
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends, BackgroundTasks, Query
 from sqlalchemy.orm import Session
 
+from config.models import AVAILABLE_MODELS, DEFAULT_MODEL
 from core.database import get_db
 from models.document import Document
 from models.project import Project
@@ -113,6 +114,7 @@ async def process_project(
     project_id: uuid.UUID,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
+    model: Optional[str] = Query(None, description="Model key for extraction"),
 ):
     project = db.query(Project).filter(Project.project_id == project_id).first()
     if not project:
@@ -124,15 +126,20 @@ async def process_project(
     if project.processing_status == "processing":
         return {"message": "Already processing", "project_id": str(project_id)}
 
+    # Validate model key if provided
+    model_key = model if model and model in AVAILABLE_MODELS else None
+
     # Mark as processing immediately and return -- pipeline runs in background
     project.processing_status = "processing"
     project.processing_started_at = datetime.now()
+    project.error_message = None  # clear previous errors
     db.commit()
 
-    background_tasks.add_task(_run_pipeline, project_id)
+    background_tasks.add_task(_run_pipeline, project_id, model_key=model_key)
 
     return {
         "project_id": str(project_id),
         "status": "processing",
+        "model": model_key or DEFAULT_MODEL,
         "message": "Processing started. Poll /projects/{project_id} for status.",
     }

@@ -4,6 +4,7 @@ import time
 import re
 
 from config.parameters import FACADE_PARAMETERS
+from config.models import AVAILABLE_MODELS, DEFAULT_MODEL, get_model_config
 from models.document_chunk import DocumentChunk
 from models.extracted_parameter import ExtractedParameter
 
@@ -20,12 +21,9 @@ from typing import Dict, List, Optional
 # ── Constants ────────────────────────────────────────────────────────────────
 BATCH_SIZE       = 10    # params per LLM call for vector-search fallback (Pass 2)
 SCORE_THRESHOLD  = 0.05  # low threshold — let Claude decide relevance, not vector similarity
-MODEL            = "claude-opus-4-20250514"
 
 # ── Full-context extraction constants (Pass 1) ──────────────────────────────
-FULL_CONTEXT_WINDOW_TOKENS = 120_000   # raw content tokens per window (leaves room for prompt+formatting)
 FULL_CONTEXT_OVERLAP       = 3         # parent chunks overlap between windows
-FULL_CONTEXT_MAX_RESPONSE  = 32_000    # response tokens — 102 params × ~200 tokens each + safety margin
 TOKENS_PER_WORD            = 1.35      # average tokens per word estimate
 
 # ── Module-level LLM rate limiter ─────────────────────────────────────────────
@@ -44,12 +42,30 @@ def _get_llm_semaphore() -> asyncio.Semaphore:
 class ParameterExtractor:
     """Extract facade parameters using batched LLM calls for speed and quality."""
 
-    def __init__(self, pinecone_index, embedding_client, db_session, session_factory=None):
+    def __init__(self, pinecone_index, embedding_client, db_session, session_factory=None, model_key=None):
         self.pinecone        = pinecone_index
         self.embedder        = embedding_client
         self.db              = db_session
         self.session_factory = session_factory
         self.anthropic       = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+        # Model configuration — can be switched per extraction run
+        self.model_key = model_key or DEFAULT_MODEL
+        self.model_config = get_model_config(self.model_key)
+        self.model_id = self.model_config["model_id"]
+        self.provider = self.model_config["provider"]
+        self.max_response_tokens = self.model_config["max_response_tokens"]
+        self.context_window_tokens = self.model_config["context_window_tokens"]
+
+        # Gemini client for Google models
+        if self.provider == "google":
+            from core.clients import gemini_client
+            self.gemini = gemini_client
+
+        logger.info(
+            f"[EXTRACTOR] Using model: {self.model_config['display_name']} "
+            f"({self.model_id}, {self.provider})"
+        )
 
     # ── Shared helpers ────────────────────────────────────────────────────────
 
@@ -86,6 +102,32 @@ class ParameterExtractor:
             header = f"[{i}|{c['document_name']}|p.{c['page_number']}]"
             parts.append(f"{header}\n{c['chunk_text']}")
         return "\n\n".join(parts)
+
+    def _call_provider(self, system: str, prompt: str, max_tokens: int) -> str:
+        """Route LLM call to the configured provider (Anthropic or Google)."""
+        if self.provider == "anthropic":
+            response = self.anthropic.messages.create(
+                model=self.model_id,
+                max_tokens=max_tokens,
+                temperature=0.05,
+                system=system,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return response.content[0].text
+        elif self.provider == "google":
+            from google import genai
+            full_prompt = f"{system}\n\n{prompt}"
+            response = self.gemini.models.generate_content(
+                model=self.model_id,
+                contents=full_prompt,
+                config=genai.types.GenerateContentConfig(
+                    temperature=0.05,
+                    max_output_tokens=max_tokens,
+                ),
+            )
+            return response.text
+        else:
+            raise ValueError(f"Unknown provider: {self.provider}")
 
     def _fetch_chunks_from_db(self, session, chunk_ids: List[str], scores: Dict) -> List[Dict]:
         """Fetch chunks from DB, expand to parents, return sorted by score."""
@@ -199,7 +241,7 @@ class ParameterExtractor:
         return int(len(text.split()) * TOKENS_PER_WORD)
 
     def _build_context_windows(
-        self, parent_dicts: List[Dict], max_tokens: int = FULL_CONTEXT_WINDOW_TOKENS
+        self, parent_dicts: List[Dict], max_tokens: int = None
     ) -> List[List[Dict]]:
         """Split parent chunks into context windows that fit within token budget.
 
@@ -207,6 +249,9 @@ class ParameterExtractor:
         Consecutive windows overlap by FULL_CONTEXT_OVERLAP chunks so no
         content falls through boundary cracks.
         """
+        if max_tokens is None:
+            max_tokens = self.context_window_tokens
+
         if not parent_dicts:
             return []
 
@@ -233,7 +278,7 @@ class ParameterExtractor:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=2, min=10, max=60),
-        retry=retry_if_exception_type((anthropic.RateLimitError, anthropic.APIStatusError))
+        retry=retry_if_exception_type((anthropic.RateLimitError, anthropic.APIStatusError, Exception))
     )
     def _call_llm_full_context(self, all_params: List[Dict], context: str) -> str:
         """LLM call with FULL document context and ALL parameters.
@@ -269,18 +314,12 @@ RULES:
 Return ONLY valid JSON — one key per parameter:
 {{"param_name": {{"found":true,"value":"val","value_numeric":null,"unit":"u","confidence":0.9,"source_numbers":[1],"explanation":"brief"}}, ...}}"""
 
-        response = self.anthropic.messages.create(
-            model=MODEL,
-            max_tokens=FULL_CONTEXT_MAX_RESPONSE,
-            temperature=0.05,
-            system=(
-                "You are an expert facade engineer extracting technical parameters "
-                "from complete tender documents. You have the FULL document text — "
-                "extract every parameter thoroughly. Always return valid JSON."
-            ),
-            messages=[{"role": "user", "content": prompt}],
+        system = (
+            "You are an expert facade engineer extracting technical parameters "
+            "from complete tender documents. You have the FULL document text — "
+            "extract every parameter thoroughly. Always return valid JSON."
         )
-        return response.content[0].text
+        return self._call_provider(system, prompt, self.max_response_tokens)
 
     async def _extract_full_context_async(
         self,
@@ -407,7 +446,7 @@ Return ONLY valid JSON — one key per parameter:
     @retry(
         stop=stop_after_attempt(4),
         wait=wait_exponential(multiplier=1, min=6, max=45),
-        retry=retry_if_exception_type((anthropic.RateLimitError, anthropic.APIStatusError))
+        retry=retry_if_exception_type((anthropic.RateLimitError, anthropic.APIStatusError, Exception))
     )
     def _call_llm_batch(self, batch_params: List[Dict], context: str) -> str:
         """Single LLM call to extract multiple parameters from shared context."""
@@ -462,20 +501,14 @@ Return ONLY a valid JSON object with each parameter name as a key:
 
 IMPORTANT for found=false: explanation MUST state (a) what terms were searched for, (b) whether a related value was seen but couldn't be confirmed, or (c) clearly say "Not specified in documents" — never leave explanation vague."""
 
+        system = "You are an expert facade engineer extracting technical parameters. Always return valid JSON."
         try:
-            response = self.anthropic.messages.create(
-                model=MODEL,
-                max_tokens=4096,
-                temperature=0.05,
-                system="You are an expert facade engineer extracting technical parameters. Always return valid JSON.",
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return response.content[0].text
+            return self._call_provider(system, prompt, 4096)
         except anthropic.RateLimitError:
             logger.warning(f"Rate limit hit — retrying batch of {len(batch_params)} params")
             raise
-        except anthropic.APIStatusError as e:
-            logger.error(f"Anthropic API error: {e.status_code} — {e.message}")
+        except Exception as e:
+            logger.error(f"LLM API error in batch: {e}")
             raise
 
     def _parse_batch_response(
@@ -635,7 +668,7 @@ IMPORTANT for found=false: explanation MUST state (a) what terms were searched f
     @retry(
         stop=stop_after_attempt(4),
         wait=wait_exponential(multiplier=1, min=6, max=45),
-        retry=retry_if_exception_type((anthropic.RateLimitError, anthropic.APIStatusError))
+        retry=retry_if_exception_type((anthropic.RateLimitError, anthropic.APIStatusError, Exception))
     )
     def _call_llm(self, param_config: Dict, context: str) -> str:
         prompt = f"""You are an expert extracting technical parameters from facade/curtain wall specifications.
@@ -662,19 +695,8 @@ Return ONLY JSON:
 Set found=true if ANY relevant information exists. Include all source numbers with relevant info.
 If found=false, explanation must clearly state: what terms were searched, what (if anything) was found nearby, and confirm "Not specified in documents" if truly absent."""
 
-        try:
-            response = self.anthropic.messages.create(
-                model=MODEL,
-                max_tokens=2048,
-                temperature=0.05,
-                system="You are an expert facade engineer. Return valid JSON only.",
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return response.content[0].text
-        except anthropic.RateLimitError:
-            raise
-        except anthropic.APIStatusError:
-            raise
+        system = "You are an expert facade engineer. Return valid JSON only."
+        return self._call_provider(system, prompt, 2048)
 
     def _parse_llm_response(self, response_text: str, param_config: Dict, chunk_dicts: List[Dict]) -> Dict:
         try:

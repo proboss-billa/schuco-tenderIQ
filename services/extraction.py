@@ -14,10 +14,10 @@ from processing.document_processor import DocumentProcessor
 from services.pipeline import _wait_for_pinecone_doc
 
 
-async def _run_extraction(pid: uuid.UUID):
+async def _run_extraction(pid: uuid.UUID, model_key: str = None):
     _timing_project_id.set(str(pid))
     _project_timings[str(pid)] = []   # reset on re-extract
-    _pipeline_log.info(f"[RE-EXTRACT] Starting for project {pid}")
+    _pipeline_log.info(f"[RE-EXTRACT] Starting for project {pid} (model={model_key or 'default'})")
     _db = SessionLocal()
     try:
         # Mark as processing so the frontend polling detects it
@@ -25,6 +25,7 @@ async def _run_extraction(pid: uuid.UUID):
         if _proj:
             _proj.processing_status = "processing"
             _proj.pipeline_step = "Re-extracting parameters from all documents..."
+            _proj.error_message = None  # clear previous errors
             _db.commit()
 
         # Count already-processed docs so top_k / max_sources scale correctly
@@ -46,6 +47,7 @@ async def _run_extraction(pid: uuid.UUID):
             embedding_client=embedding_client,
             db_session=_db,
             session_factory=SessionLocal,
+            model_key=model_key,
         )
         extractions = await extractor.extract_all_parameters_async(
             str(pid),

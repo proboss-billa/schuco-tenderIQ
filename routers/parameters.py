@@ -1,10 +1,12 @@
 import json as _json
 import uuid
+from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Query
 from sqlalchemy.orm import Session
 
 from config.parameters import FACADE_PARAMETERS
+from config.models import list_models, AVAILABLE_MODELS, DEFAULT_MODEL
 from core.database import get_db
 from models.document import Document
 from models.extracted_parameter import ExtractedParameter
@@ -114,6 +116,7 @@ async def re_extract_parameters(
     project_id: uuid.UUID,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
+    model: Optional[str] = Query(None, description="Model key: claude-opus-4, claude-sonnet-4, claude-haiku-3.5, gemini-flash"),
 ):
     """Re-run just the parameter extraction step on an already-processed project.
     Skips document parsing/embedding -- uses vectors already in Pinecone."""
@@ -128,10 +131,14 @@ async def re_extract_parameters(
             detail="Extraction is already running. Please wait for it to complete.",
         )
 
-    background_tasks.add_task(_run_extraction, project_id)
+    # Validate model key if provided
+    model_key = model if model and model in AVAILABLE_MODELS else None
+
+    background_tasks.add_task(_run_extraction, project_id, model_key=model_key)
     return {
         "project_id": str(project_id),
         "status": "re-extracting",
+        "model": model_key or DEFAULT_MODEL,
         "message": "Extraction started. Check /projects/{project_id}/parameters after ~60s.",
     }
 
@@ -159,4 +166,13 @@ async def re_extract_single_parameter(
         "parameter_name": param_name,
         "status": "re-extracting",
         "message": f"Re-extraction of '{param_config['display_name']}' started.",
+    }
+
+
+@router.get("/models")
+def get_available_models():
+    """List available LLM models for extraction."""
+    return {
+        "models": list_models(),
+        "default": DEFAULT_MODEL,
     }

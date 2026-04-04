@@ -56,15 +56,15 @@ async def _wait_for_pinecone_doc(project_id: str, document_id: str, timeout: int
     return False
 
 
-async def _run_pipeline(project_id: uuid.UUID):
+async def _run_pipeline(project_id: uuid.UUID, model_key: str = None):
     """Queuing wrapper -- acquires global pipeline slot, then delegates to inner."""
     _timing_project_id.set(str(project_id))
     _pipeline_log.info(f"[PIPELINE] Queued project {project_id} -- waiting for pipeline slot...")
     async with _PIPELINE_SEMAPHORE:
-        await _run_pipeline_inner(project_id)
+        await _run_pipeline_inner(project_id, model_key=model_key)
 
 
-async def _run_pipeline_inner(project_id: uuid.UUID):
+async def _run_pipeline_inner(project_id: uuid.UUID, model_key: str = None):
     """Background task: per-document parse -> embed -> extract parameters.
 
     Architecture
@@ -312,6 +312,7 @@ async def _run_pipeline_inner(project_id: uuid.UUID):
                 embedding_client=embedding_client,
                 db_session=db,
                 session_factory=SessionLocal,
+                model_key=model_key,
             )
             t_extract = _time.perf_counter()
             extractions = await extractor.extract_all_parameters_async(
