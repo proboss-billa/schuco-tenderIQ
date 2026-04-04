@@ -733,21 +733,44 @@ class DocumentProcessor:
         # ── Step 1: Parse ─────────────────────────────────────────────────────
         t0 = time.perf_counter()
         if document.file_type in ('pdf_spec', 'pdf_drawing'):
-            # Always use hybrid parser — classifies EVERY page independently:
-            # text pages (≥100 chars) → standard text extraction
-            # drawing pages (<100 chars) → Gemini Vision
-            # This handles mixed PDFs (specs + drawings in one file).
+            # Universal hybrid parser — classifies EVERY page independently:
+            # text pages (≥100 chars) → PyMuPDF spans + pdfplumber tables
+            # image pages (<100 chars) → Gemini Vision with adaptive prompt
+            #   (auto-detects drawings vs scanned text vs tables vs forms)
             from parsing.drawing_pdf_parser import DrawingPDFParser
             parser = DrawingPDFParser()
             parsed_content, page_count, parse_stats = parser.parse_with_page_count(document.file_path)
             document.page_count = page_count
 
+            # Handle parse errors (password-protected, corrupt, etc.)
+            if parse_stats.get("error"):
+                error_type = parse_stats["error"]
+                logger.error(f"[PARSE] {doc_name}: parse failed — {error_type}")
+                document.processing_status = "error"
+                document.processing_error = f"PDF parse error: {error_type}"
+                self.db.commit()
+                return
+
             # Reclassify file_type based on actual page content
-            vision_ratio = parse_stats["vision_pages"] / max(page_count, 1)
+            # Use vision sub-type counts for smarter classification
+            vision_total = parse_stats["vision_pages"]
+            vision_drawings = parse_stats.get("vision_drawings", 0)
+            vision_scanned = parse_stats.get("vision_scanned", 0)
+            vision_ratio = vision_total / max(page_count, 1)
+            drawing_ratio = vision_drawings / max(page_count, 1)
+
             original_type = document.file_type
-            if vision_ratio > 0.5:
+            if drawing_ratio > 0.5:
+                # Majority are actual drawings
                 document.file_type = "pdf_drawing"
-            elif vision_ratio > 0.15:
+            elif vision_ratio > 0.5 and vision_scanned > vision_drawings:
+                # Majority are scanned text — still a spec, just scanned
+                document.file_type = "pdf_spec"
+                logger.info(
+                    f"[PARSE] {doc_name}: scanned PDF detected "
+                    f"({vision_scanned} scanned pages, {vision_drawings} drawings)"
+                )
+            elif drawing_ratio > 0.15 or (vision_ratio > 0.15 and vision_drawings > 0):
                 document.file_type = "pdf_mixed"
             else:
                 if document.file_type == "pdf_drawing":
@@ -757,13 +780,15 @@ class DocumentProcessor:
             if document.file_type != original_type:
                 logger.info(
                     f"[PARSE] {doc_name}: reclassified {original_type} → {document.file_type} "
-                    f"(text:{parse_stats['text_pages']} vision:{parse_stats['vision_pages']} "
+                    f"(text:{parse_stats['text_pages']} vision:{vision_total} "
+                    f"[drawings:{vision_drawings} scanned:{vision_scanned} "
+                    f"tables:{parse_stats.get('vision_tables', 0)}] "
                     f"skipped:{parse_stats['skipped_pages']})"
                 )
             else:
                 logger.info(
                     f"[PARSE] {doc_name}: {document.file_type} confirmed "
-                    f"(text:{parse_stats['text_pages']} vision:{parse_stats['vision_pages']})"
+                    f"(text:{parse_stats['text_pages']} vision:{vision_total})"
                 )
         elif document.file_type in ('dxf_drawing', 'dwg_drawing'):
             from parsing.dxf_parser import DXFParser
