@@ -13,10 +13,11 @@ DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 engine = create_engine(
     DATABASE_URL,
-    pool_size=10,
-    max_overflow=20,
+    pool_size=15,
+    max_overflow=25,
     pool_pre_ping=True,
     pool_recycle=1800,
+    pool_timeout=10,  # fail fast on pool exhaustion instead of hanging 30s
 )
 
 SessionLocal = sessionmaker(bind=engine)

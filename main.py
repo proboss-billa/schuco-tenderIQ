@@ -1,4 +1,6 @@
 # main.py
+import asyncio
+import logging
 import os
 import uuid
 
@@ -7,11 +9,16 @@ load_dotenv()
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from auth.utils import hash_password
 from core.database import SessionLocal
+from core.clients import validate_clients, get_client_status
 from migrations.initial_schema import create_tables, run_migrations
 from models.user import User
+from models.project import Project
 
 # Import core.logging to attach timing handlers at module load
 import core.logging  # noqa: F401
@@ -24,6 +31,8 @@ from routers.documents import router as documents_router
 from routers.parameters import router as parameters_router
 from routers.query import router as query_router
 from routers.timings import router as timings_router
+
+logger = logging.getLogger("tenderiq.main")
 
 app = FastAPI(title="Tender Analysis POC API", debug=True)
 
@@ -39,9 +48,40 @@ app.add_middleware(
 app.add_middleware(RequestIDMiddleware)
 
 
+# ── Timeout middleware ───────────────────────────────────────────────────────
+# Prevents any request from hanging indefinitely (e.g., slow external API).
+class TimeoutMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        try:
+            return await asyncio.wait_for(call_next(request), timeout=120.0)
+        except asyncio.TimeoutError:
+            return JSONResponse(
+                status_code=504,
+                content={"detail": "Request timed out after 120 seconds"},
+            )
+
+app.add_middleware(TimeoutMiddleware)
+
+
+# ── Health check with real dependency checks ─────────────────────────────────
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    checks = get_client_status()
+
+    # Database connectivity check
+    try:
+        db = SessionLocal()
+        db.execute(text("SELECT 1"))
+        db.close()
+        checks["database"] = "ok"
+    except Exception as e:
+        checks["database"] = f"error: {e}"
+
+    all_ok = all(v == "ok" for v in checks.values())
+    return JSONResponse(
+        content={"status": "healthy" if all_ok else "degraded", "checks": checks},
+        status_code=200 if all_ok else 503,
+    )
 
 
 # ── Include all routers ──────────────────────────────────────────────────────
@@ -58,6 +98,42 @@ app.include_router(timings_router)
 def on_startup():
     create_tables()
     run_migrations()
+
+    # Log any client initialization failures (non-fatal — app still starts)
+    errors = validate_clients()
+    if errors:
+        logger.warning(f"[STARTUP] Client initialization issues: {errors}")
+
+
+@app.on_event("startup")
+def recover_stale_processing():
+    """Mark projects stuck in 'processing' from a previous crash as 'failed'.
+
+    Without this, a server restart mid-pipeline leaves projects permanently
+    stuck — the frontend polls 200 times (10 min) then shows 'load failed'.
+    """
+    db = SessionLocal()
+    try:
+        stale = db.query(Project).filter(
+            Project.processing_status == "processing"
+        ).all()
+        for p in stale:
+            p.processing_status = "failed"
+            p.error_message = (
+                "Server restarted during processing. "
+                "Click re-extract to retry."
+            )
+            p.pipeline_step = None
+        if stale:
+            db.commit()
+            logger.info(
+                f"[STARTUP] Recovered {len(stale)} stale processing project(s)"
+            )
+    except Exception as e:
+        logger.warning(f"[STARTUP] Could not recover stale projects: {e}")
+        db.rollback()
+    finally:
+        db.close()
 
 
 @app.on_event("startup")

@@ -215,7 +215,7 @@ async def _run_doc_reprocess(pid: uuid.UUID, did: uuid.UUID):
             _doc = _db.query(Document).filter(Document.document_id == did).first()
             if _doc:
                 _doc.processing_status = "failed"
-                _doc.processing_error = str(e)[:1000]
+                _doc.processing_error = str(e)[:4000]
             _proj = _db.query(Project).filter(Project.project_id == pid).first()
             if _proj:
                 _proj.processing_status = "completed"

@@ -1,10 +1,15 @@
+import logging
 import uuid
 
+import anthropic
+from fastapi import HTTPException
 from sqlalchemy.orm import Session, joinedload
 
 from core.clients import pinecone_index, embedding_client, anthropic_client
 from models.document_chunk import DocumentChunk
 from models.query_log import QueryLog
+
+logger = logging.getLogger("tenderiq.query")
 
 QUERY_SYSTEM_PROMPT = """You are TenderIQ, an expert AI tender analyst. You answer questions about tender documents, BOQs, technical specs, and project requirements.
 
@@ -29,14 +34,41 @@ Rules:
 
 def process_query(project_id: uuid.UUID, query: str, db: Session) -> dict:
     """Execute an ad-hoc query against project documents and return answer + sources."""
-    query_embedding = embedding_client.embed([query])[0]
 
-    results = pinecone_index.query(
-        vector=query_embedding,
-        top_k=5,
-        filter={"project_id": str(project_id)},
-        include_metadata=True,
-    )
+    # ── Embed query (with error handling) ────────────────────────────────────
+    if embedding_client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Embedding service not initialized. Check server logs.",
+        )
+    try:
+        query_embedding = embedding_client.embed([query])[0]
+    except Exception as e:
+        logger.error(f"[QUERY] Embedding failed: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Embedding service unavailable: {e}",
+        )
+
+    # ── Vector search (with error handling) ──────────────────────────────────
+    if pinecone_index is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Vector database not initialized. Check server logs.",
+        )
+    try:
+        results = pinecone_index.query(
+            vector=query_embedding,
+            top_k=5,
+            filter={"project_id": str(project_id)},
+            include_metadata=True,
+        )
+    except Exception as e:
+        logger.error(f"[QUERY] Pinecone search failed: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Vector search failed: {e}",
+        )
 
     chunk_ids = [match["id"] for match in results["matches"]]
     child_chunks = db.query(DocumentChunk).options(
@@ -86,13 +118,39 @@ def process_query(project_id: uuid.UUID, query: str, db: Session) -> dict:
             for log in recent_logs if log.response_text
         ) + "\n\n"
 
-    response = anthropic_client.messages.create(
-        model="claude-opus-4-20250514",
-        max_tokens=2048,
-        temperature=0.3,
-        system=QUERY_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": f"{chat_history}Question: {query}\n\nDocument Context:\n{context}"}],
-    )
+    # ── LLM call (with timeout and error handling) ───────────────────────────
+    if anthropic_client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="AI service not initialized. Check server logs.",
+        )
+    try:
+        response = anthropic_client.messages.create(
+            model="claude-opus-4-20250514",
+            max_tokens=2048,
+            temperature=0.3,
+            timeout=60.0,  # prevent indefinite hang
+            system=QUERY_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": f"{chat_history}Question: {query}\n\nDocument Context:\n{context}"}],
+        )
+    except anthropic.APITimeoutError:
+        logger.warning(f"[QUERY] Anthropic timed out for project {project_id}")
+        raise HTTPException(
+            status_code=504,
+            detail="AI response timed out. Try a shorter or simpler question.",
+        )
+    except anthropic.RateLimitError:
+        logger.warning(f"[QUERY] Anthropic rate limited for project {project_id}")
+        raise HTTPException(
+            status_code=429,
+            detail="AI service is rate limited. Please wait a moment and try again.",
+        )
+    except anthropic.APIError as e:
+        logger.error(f"[QUERY] Anthropic API error: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"AI service error: {e}",
+        )
 
     answer = response.content[0].text
 

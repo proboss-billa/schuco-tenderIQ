@@ -448,10 +448,20 @@ class DocumentProcessor:
             })
 
         t_flush = time.perf_counter()
-        # Batch-upsert to Pinecone (max 100 vectors per call)
+        # Batch-upsert to Pinecone (max 100 vectors per call) with retry
         PINECONE_BATCH = 100
         for start in range(0, len(pinecone_vectors), PINECONE_BATCH):
-            self.pinecone.upsert(vectors=pinecone_vectors[start: start + PINECONE_BATCH])
+            batch = pinecone_vectors[start: start + PINECONE_BATCH]
+            for attempt in range(3):
+                try:
+                    self.pinecone.upsert(vectors=batch)
+                    break
+                except Exception as e:
+                    if attempt == 2:
+                        logger.error(f"[STORE] Pinecone upsert failed after 3 attempts for batch {start}: {e}")
+                        raise
+                    logger.warning(f"[STORE] Pinecone upsert retry {attempt+1}: {e}")
+                    time.sleep(2 ** attempt)
         t_pine = time.perf_counter()
 
         self.db.commit()
@@ -906,7 +916,17 @@ class DocumentProcessor:
         t0 = time.perf_counter()
         PINECONE_BATCH = 100
         for start in range(0, len(pinecone_vectors), PINECONE_BATCH):
-            self.pinecone.upsert(vectors=pinecone_vectors[start: start + PINECONE_BATCH])
+            batch = pinecone_vectors[start: start + PINECONE_BATCH]
+            for attempt in range(3):
+                try:
+                    self.pinecone.upsert(vectors=batch)
+                    break
+                except Exception as e:
+                    if attempt == 2:
+                        logger.error(f"[STORE] BOQ Pinecone upsert failed after 3 attempts: {e}")
+                        raise
+                    logger.warning(f"[STORE] BOQ Pinecone upsert retry {attempt+1}: {e}")
+                    time.sleep(2 ** attempt)
         logger.info(f"[TIMING][BOQ_PINECONE] {doc_name}: {time.perf_counter() - t0:.2f}s ({len(pinecone_vectors)} vectors)")
 
         document.processed = True

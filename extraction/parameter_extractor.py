@@ -1085,14 +1085,25 @@ If found=false, explanation must clearly state: what terms were searched, what (
 
         # ═══════════ PASS 3: Persist ALL results (found + not-found) ═══════════
         found_count = 0
+        store_failures = []
         param_map = {p['name']: p for p in facade_parameters}
         for result in all_results:
-            if result.get('found'):
-                found_count += 1
             pname = result.get('parameter_name')
             param_config = param_map.get(pname)
             if param_config:
-                self._store_extraction(project_id, param_config, result)
+                try:
+                    self._store_extraction(project_id, param_config, result)
+                    if result.get('found'):
+                        found_count += 1
+                except Exception as e:
+                    store_failures.append(pname)
+                    logger.error(f"[EXTRACT_ALL] Store failed for {pname}: {e}")
+
+        if store_failures:
+            logger.error(
+                f"[EXTRACT_ALL] {len(store_failures)} params failed to persist: "
+                f"{store_failures}"
+            )
 
         pass2_recovered = found_count - pass1_found
         extraction_time = time.perf_counter() - t_all_start

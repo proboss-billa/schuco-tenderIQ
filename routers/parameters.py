@@ -102,6 +102,7 @@ async def get_extracted_parameters(project_id: uuid.UUID, db: Session = Depends(
         "project_type": getattr(project, "project_type", "commercial") or "commercial",
         "processing_status": project.processing_status,
         "pipeline_step": getattr(project, 'pipeline_step', None),
+        "error_message": getattr(project, 'error_message', None),
         "parameters": results,
         "total_extracted": len(results),
         "documents": documents_info,
@@ -119,6 +120,13 @@ async def re_extract_parameters(
     project = db.query(Project).filter(Project.project_id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+
+    # Idempotency guard: prevent concurrent re-extractions
+    if project.processing_status == "processing":
+        raise HTTPException(
+            status_code=409,
+            detail="Extraction is already running. Please wait for it to complete.",
+        )
 
     background_tasks.add_task(_run_extraction, project_id)
     return {

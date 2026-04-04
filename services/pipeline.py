@@ -22,11 +22,13 @@ from processing.document_processor import DocumentProcessor
 _PIPELINE_SEMAPHORE = asyncio.Semaphore(3)
 
 
-async def _wait_for_pinecone_doc(project_id: str, document_id: str, timeout: int = 90) -> None:
+async def _wait_for_pinecone_doc(project_id: str, document_id: str, timeout: int = 90) -> bool:
     """Poll Pinecone until a specific document's vectors are queryable.
 
     Uses a per-document filter so we only proceed once THIS doc's chunks are
     visible -- not just any old vector from a previous run.
+
+    Returns True if ready, False if timed out.
     """
     dummy_vec = [0.0] * 1536
     elapsed = 0
@@ -45,12 +47,13 @@ async def _wait_for_pinecone_doc(project_id: str, document_id: str, timeout: int
                 _pipeline_log.info(
                     f"[PIPELINE] Pinecone ready for doc {document_id} after {elapsed}s"
                 )
-                return
+                return True
         except Exception as exc:
             _pipeline_log.warning(f"[PIPELINE] Pinecone probe error: {exc}")
     _pipeline_log.warning(
         f"[PIPELINE] Pinecone timed out for doc {document_id} after {timeout}s -- proceeding anyway"
     )
+    return False
 
 
 async def _run_pipeline(project_id: uuid.UUID):
@@ -128,7 +131,7 @@ async def _run_pipeline_inner(project_id: uuid.UUID):
             except Exception as e:
                 _pipeline_log.error(f"[PIPELINE] BOQ failed {doc.original_filename}: {e}")
                 doc.processing_status = "failed"
-                doc.processing_error = str(e)[:1000]
+                doc.processing_error = str(e)[:4000]
             db.commit()
 
         # ── Phase 1: Parse all spec docs in PARALLEL ─────────────────────────
@@ -198,7 +201,7 @@ async def _run_pipeline_inner(project_id: uuid.UUID):
                         ).first()
                         if doc_local:
                             doc_local.processing_status = "failed"
-                            doc_local.processing_error = str(e)[:1000]
+                            doc_local.processing_error = str(e)[:4000]
                             doc_session.commit()
                     except Exception:
                         pass
@@ -271,11 +274,23 @@ async def _run_pipeline_inner(project_id: uuid.UUID):
             )
             db.commit()
             t_wait_all = _time.perf_counter()
-            await asyncio.gather(*all_pinecone_tasks)
+            pinecone_results = await asyncio.gather(*all_pinecone_tasks)
             _pipeline_log.info(
                 f"[TIMING][PIPELINE] All Pinecone waits completed: "
                 f"{_time.perf_counter() - t_wait_all:.2f}s"
             )
+            # Surface Pinecone timeout as a visible warning
+            timed_out_count = sum(1 for r in pinecone_results if r is False)
+            if timed_out_count > 0:
+                _pipeline_log.warning(
+                    f"[PIPELINE] {timed_out_count}/{len(all_pinecone_tasks)} "
+                    f"doc(s) not indexed in Pinecone — extraction may be degraded"
+                )
+                project.error_message = (
+                    f"{timed_out_count} document(s) not fully indexed in vector database. "
+                    f"Results may be incomplete — try re-extracting if parameters are missing."
+                )
+                db.commit()
 
         # ── Phase 2: Extract ALL parameters ONCE after all docs are indexed ───
         total_indexed = indexed_spec_count + len(boq_docs)

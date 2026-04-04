@@ -15,6 +15,9 @@ from services.pipeline import _run_pipeline
 
 router = APIRouter(prefix="", tags=["projects"])
 
+MAX_FILE_SIZE = 100 * 1024 * 1024    # 100 MB per file
+MAX_TOTAL_SIZE = 500 * 1024 * 1024   # 500 MB total per project
+
 
 @router.get("/projects")
 def list_projects(db: Session = Depends(get_db)):
@@ -60,18 +63,35 @@ async def create_project(
     upload_dir.mkdir(parents=True, exist_ok=True)
 
     saved_documents = []
+    total_size = 0
     for file in files:
         file_type = classify_file_type(file.filename)
         file_path = upload_dir / file.filename
+        file_size = 0
         async with aiofiles.open(str(file_path), "wb") as buffer:
             while chunk := await file.read(1024 * 1024):  # 1 MB chunks
+                file_size += len(chunk)
+                if file_size > MAX_FILE_SIZE:
+                    file_path.unlink(missing_ok=True)
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File '{file.filename}' exceeds 100 MB limit.",
+                    )
                 await buffer.write(chunk)
+
+        total_size += file_size
+        if total_size > MAX_TOTAL_SIZE:
+            file_path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=413,
+                detail="Total upload size exceeds 500 MB limit.",
+            )
 
         document = Document(
             project_id=project.project_id,
             original_filename=file.filename,
             file_type=file_type,
-            file_size_bytes=file_path.stat().st_size,
+            file_size_bytes=file_size,
             file_path=str(file_path),
         )
         db.add(document)
