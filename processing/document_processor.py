@@ -259,7 +259,7 @@ class DocumentProcessor:
                     "text":            " ".join(parent_words),
                     "document_id":     document.document_id,
                     "file_type":       document.file_type,
-                    "source_type":     sec.get("source_type", document.file_type),
+                    "source_type":     sec.get("source_type") or document.file_type or "pdf_spec",
                     "page_start":      sec["page_start"],
                     "page_end":        sec["page_end"],
                     "section":         sec["section"],
@@ -283,7 +283,7 @@ class DocumentProcessor:
                         "text":            " ".join(child_words),
                         "document_id":     document.document_id,
                         "file_type":       document.file_type,
-                        "source_type":     sec.get("source_type", document.file_type),
+                        "source_type":     sec.get("source_type") or document.file_type or "pdf_spec",
                         "page_start":      sec["page_start"],
                         "page_end":        sec["page_end"],
                         "section":         sec["section"],
@@ -404,22 +404,23 @@ class DocumentProcessor:
             )
             self.db.add(db_chunk)
 
+            # Pinecone rejects null metadata values — coerce every field to a
+            # concrete type.  chunk.get("source_type") may be None even when the
+            # key exists (e.g. chunks built from sections where source_type was
+            # never set), so use `or` to fall through to the document-level default.
             pinecone_vectors.append({
                 "id": vector_id,
                 "values": embedding,
                 "metadata": {
                     "document_id": str(document.document_id),
                     "project_id":  str(self.project_id),
-                    # Use per-chunk source_type when available (set by DrawingPDFParser
-                    # to distinguish vision-extracted drawing pages from text pages within
-                    # the same mixed PDF). Falls back to document-level file_type.
-                    "file_type":   chunk.get("source_type", document.file_type),
+                    "file_type":   chunk.get("source_type") or document.file_type or "pdf_spec",
                     "section":     chunk.get("section") or "",
                     "subsection":  chunk.get("subsection") or "",
                     "page_start":  chunk.get("page_start") or 0,
                     "is_table":    chunk.get("is_table", False),
                     "chunk_level": 1,
-                    "text_preview": chunk["text"][:200],
+                    "text_preview": (chunk["text"] or "")[:200],
                 },
             })
 
@@ -839,7 +840,7 @@ class DocumentProcessor:
                     "metadata": {
                         "document_id": str(document.document_id),
                         "project_id": str(self.project_id),
-                        "file_type": document.file_type,
+                        "file_type": document.file_type or "excel_boq",
                         "section": item.get("category") or "",
                         "subsection": item.get("sub_category") or "",
                         "page_start": 0,
