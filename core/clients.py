@@ -89,6 +89,17 @@ except Exception as e:
     _initialization_errors.append(f"Anthropic: {e}")
     logger.error(f"[STARTUP] Anthropic client initialization failed: {e}")
 
+openai_client = None
+try:
+    from openai import OpenAI
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY environment variable not set")
+    openai_client = OpenAI(api_key=api_key)
+except Exception as e:
+    _initialization_errors.append(f"OpenAI: {e}")
+    logger.error(f"[STARTUP] OpenAI client initialization failed: {e}")
+
 
 def validate_clients() -> list[str]:
     """Return list of initialization errors. Empty list = all clients OK."""
@@ -102,4 +113,5 @@ def get_client_status() -> dict[str, str]:
         "embedding": "ok" if embedding_client is not None else "not initialized",
         "gemini": "ok" if gemini_client is not None else "not initialized",
         "anthropic": "ok" if anthropic_client is not None else "not initialized",
+        "openai": "ok" if openai_client is not None else "not initialized",
     }

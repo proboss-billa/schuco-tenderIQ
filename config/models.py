@@ -22,12 +22,47 @@ AVAILABLE_MODELS = {
         "max_response_tokens": 8_192,
         "context_window_tokens": 120_000,
     },
-    "gemini-flash": {
+    "gemini-2.5-flash": {
         "provider": "google",
-        "model_id": "gemini-2.0-flash",
-        "display_name": "Gemini 2.0 Flash",
+        "model_id": "gemini-2.5-flash",
+        "display_name": "Gemini 2.5 Flash",
         "max_response_tokens": 8_192,
         "context_window_tokens": 120_000,
+    },
+    "gemini-3-flash": {
+        "provider": "google",
+        "model_id": "gemini-3-flash-preview",
+        "display_name": "Gemini 3 Flash",
+        "max_response_tokens": 8_192,
+        "context_window_tokens": 120_000,
+    },
+    "gemini-3.1-pro": {
+        "provider": "google",
+        "model_id": "gemini-3.1-pro-preview",
+        "display_name": "Gemini 3.1 Pro",
+        "max_response_tokens": 16_000,
+        "context_window_tokens": 120_000,
+    },
+    "gpt-5.4": {
+        "provider": "openai",
+        "model_id": "gpt-5.4-2026-03-05",
+        "display_name": "GPT-5.4",
+        "max_response_tokens": 16_000,
+        "context_window_tokens": 128_000,
+    },
+    "gpt-5.4-nano": {
+        "provider": "openai",
+        "model_id": "gpt-5.4-nano-2026-03-17",
+        "display_name": "GPT-5.4 Nano",
+        "max_response_tokens": 8_192,
+        "context_window_tokens": 128_000,
+    },
+    "gpt-5-mini": {
+        "provider": "openai",
+        "model_id": "gpt-5-mini-2025-08-07",
+        "display_name": "GPT-5 Mini",
+        "max_response_tokens": 8_192,
+        "context_window_tokens": 128_000,
     },
 }
 

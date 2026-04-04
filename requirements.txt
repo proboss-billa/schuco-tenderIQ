@@ -13,6 +13,7 @@ xlrd>=2.0.1
 python-multipart==0.0.9
 google-genai>=0.3.0
 anthropic>=0.42.0
+openai>=1.30.0
 tenacity>=8.0.0
 requests>=2.31.0
 passlib[bcrypt,argon2]==1.7.4

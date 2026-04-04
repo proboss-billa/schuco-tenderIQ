@@ -61,6 +61,10 @@ class ParameterExtractor:
         if self.provider == "google":
             from core.clients import gemini_client
             self.gemini = gemini_client
+        # OpenAI client for GPT models
+        elif self.provider == "openai":
+            from core.clients import openai_client
+            self.openai = openai_client
 
         logger.info(
             f"[EXTRACTOR] Using model: {self.model_config['display_name']} "
@@ -104,7 +108,7 @@ class ParameterExtractor:
         return "\n\n".join(parts)
 
     def _call_provider(self, system: str, prompt: str, max_tokens: int) -> str:
-        """Route LLM call to the configured provider (Anthropic or Google)."""
+        """Route LLM call to the configured provider (Anthropic, Google, or OpenAI)."""
         if self.provider == "anthropic":
             response = self.anthropic.messages.create(
                 model=self.model_id,
@@ -126,6 +130,19 @@ class ParameterExtractor:
                 ),
             )
             return response.text
+        elif self.provider == "openai":
+            if self.openai is None:
+                raise RuntimeError("OpenAI client not initialized. Check OPENAI_API_KEY.")
+            response = self.openai.chat.completions.create(
+                model=self.model_id,
+                max_tokens=max_tokens,
+                temperature=0.05,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+            return response.choices[0].message.content
         else:
             raise ValueError(f"Unknown provider: {self.provider}")
 

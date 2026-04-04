@@ -6,7 +6,7 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session, joinedload
 
 from config.models import get_model_config, DEFAULT_MODEL
-from core.clients import pinecone_index, embedding_client, anthropic_client, gemini_client
+from core.clients import pinecone_index, embedding_client, anthropic_client, gemini_client, openai_client
 from models.document_chunk import DocumentChunk
 from models.query_log import QueryLog
 
@@ -142,6 +142,24 @@ def process_query(project_id: uuid.UUID, query: str, db: Session, model_key: str
             answer = resp.text
         except Exception as e:
             logger.error(f"[QUERY] Gemini error: {e}")
+            raise HTTPException(status_code=502, detail=f"AI service error: {e}")
+    elif provider == "openai":
+        if openai_client is None:
+            raise HTTPException(status_code=503, detail="OpenAI not initialized. Check OPENAI_API_KEY.")
+        try:
+            response = openai_client.chat.completions.create(
+                model=model_id,
+                max_tokens=2048,
+                temperature=0.3,
+                timeout=60.0,
+                messages=[
+                    {"role": "system", "content": QUERY_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_content},
+                ],
+            )
+            answer = response.choices[0].message.content
+        except Exception as e:
+            logger.error(f"[QUERY] OpenAI error: {e}")
             raise HTTPException(status_code=502, detail=f"AI service error: {e}")
     else:
         if anthropic_client is None:
