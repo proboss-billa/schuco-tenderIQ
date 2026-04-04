@@ -595,9 +595,16 @@ class DocumentProcessor:
                 self.db.commit()
             except Exception as e:
                 logger.error(f"Failed to process {doc.original_filename}: {e}")
-                doc.processing_status = "failed"
-                doc.processing_error = str(e)[:1000]
-                self.db.commit()
+                try:
+                    self.db.rollback()
+                except Exception:
+                    pass
+                try:
+                    doc.processing_status = "failed"
+                    doc.processing_error = str(e)[:1000]
+                    self.db.commit()
+                except Exception:
+                    pass
                 # Continue with other documents — don't abort the whole project
 
         self._extract_all_parameters()
@@ -656,6 +663,29 @@ class DocumentProcessor:
         """
         doc_name = document.original_filename
         t_doc_start = time.perf_counter()
+
+        # ── Step 0: Idempotent cleanup — delete any chunks from interrupted runs ──
+        # If a previous pipeline was killed mid-way (e.g. uvicorn --reload fired
+        # while a run_in_executor thread was still inserting), orphaned chunks
+        # remain committed and cause UniqueViolation on the next run.
+        from sqlalchemy import text as _sa_text
+        try:
+            # Rollback any pending transaction first so the session is clean
+            self.db.rollback()
+            result = self.db.execute(
+                _sa_text("DELETE FROM document_chunks WHERE document_id = :did"),
+                {"did": document.document_id},
+            )
+            deleted_count = result.rowcount
+            self.db.commit()
+            if deleted_count > 0:
+                logger.info(f"[PARSE] {doc_name}: deleted {deleted_count} orphaned chunks before re-parse")
+        except Exception as _cleanup_err:
+            logger.warning(f"[PARSE] {doc_name}: chunk cleanup failed (non-fatal): {_cleanup_err}")
+            try:
+                self.db.rollback()
+            except Exception:
+                pass
 
         # ── Step 1: Parse ─────────────────────────────────────────────────────
         t0 = time.perf_counter()
