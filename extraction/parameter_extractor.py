@@ -18,9 +18,15 @@ import asyncio
 from typing import Dict, List, Optional
 
 # ── Constants ────────────────────────────────────────────────────────────────
-BATCH_SIZE       = 10    # params per LLM call — balanced: focused context + fewer calls
+BATCH_SIZE       = 10    # params per LLM call for vector-search fallback (Pass 2)
 SCORE_THRESHOLD  = 0.05  # low threshold — let Claude decide relevance, not vector similarity
 MODEL            = "claude-opus-4-20250514"
+
+# ── Full-context extraction constants (Pass 1) ──────────────────────────────
+FULL_CONTEXT_WINDOW_TOKENS = 120_000   # raw content tokens per window (leaves room for prompt+formatting)
+FULL_CONTEXT_OVERLAP       = 3         # parent chunks overlap between windows
+FULL_CONTEXT_MAX_RESPONSE  = 32_000    # response tokens — 102 params × ~200 tokens each + safety margin
+TOKENS_PER_WORD            = 1.35      # average tokens per word estimate
 
 # ── Module-level LLM rate limiter ─────────────────────────────────────────────
 # Caps total concurrent Anthropic calls across ALL simultaneous pipeline runs.
@@ -71,6 +77,15 @@ class ParameterExtractor:
                 f"{c['chunk_text']}"
             )
         return "\n\n---\n\n".join(parts)
+
+    @staticmethod
+    def _build_full_context(chunk_dicts: List[Dict]) -> str:
+        """Lightweight context for full-document mode — minimal headers to save tokens."""
+        parts = []
+        for i, c in enumerate(chunk_dicts, 1):
+            header = f"[{i}|{c['document_name']}|p.{c['page_number']}]"
+            parts.append(f"{header}\n{c['chunk_text']}")
+        return "\n\n".join(parts)
 
     def _fetch_chunks_from_db(self, session, chunk_ids: List[str], scores: Dict) -> List[Dict]:
         """Fetch chunks from DB, expand to parents, return sorted by score."""
@@ -142,6 +157,250 @@ class ParameterExtractor:
         all_sources = list(doc_sources.values())
         all_pages   = [pg for src in all_sources for pg in src['pages']]
         return source_meta, all_sources, all_pages
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # PASS 1: FULL-CONTEXT EXTRACTION (like Claude Web — zero retrieval loss)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _fetch_all_parent_chunks(self, project_id: str) -> List[Dict]:
+        """Fetch ALL level-0 parent chunks for a project, ordered by document + page.
+
+        These contain full section text (~3000 words each) — the same content
+        the user would paste into Claude Web. No Pinecone search needed.
+        """
+        parents = (
+            self.db.query(DocumentChunk)
+            .options(joinedload(DocumentChunk.document))
+            .filter(
+                DocumentChunk.project_id == project_id,
+                DocumentChunk.chunk_level == 0,
+            )
+            .order_by(DocumentChunk.document_id, DocumentChunk.page_number)
+            .all()
+        )
+        if not parents:
+            # Fallback: if no level-0 parents exist (legacy data), fetch all level-1 children
+            logger.warning(f"[FULL_CONTEXT] No level-0 parents found — falling back to level-1 children")
+            parents = (
+                self.db.query(DocumentChunk)
+                .options(joinedload(DocumentChunk.document))
+                .filter(
+                    DocumentChunk.project_id == project_id,
+                    DocumentChunk.chunk_level == 1,
+                )
+                .order_by(DocumentChunk.document_id, DocumentChunk.page_number)
+                .all()
+            )
+        return [self._chunk_to_dict(p, score=1.0) for p in parents]
+
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        """Rough token count: words × 1.35."""
+        return int(len(text.split()) * TOKENS_PER_WORD)
+
+    def _build_context_windows(
+        self, parent_dicts: List[Dict], max_tokens: int = FULL_CONTEXT_WINDOW_TOKENS
+    ) -> List[List[Dict]]:
+        """Split parent chunks into context windows that fit within token budget.
+
+        Returns list of windows, each a list of chunk dicts.
+        Consecutive windows overlap by FULL_CONTEXT_OVERLAP chunks so no
+        content falls through boundary cracks.
+        """
+        if not parent_dicts:
+            return []
+
+        windows: List[List[Dict]] = []
+        current_window: List[Dict] = []
+        current_tokens = 0
+
+        for chunk in parent_dicts:
+            chunk_tokens = self._estimate_tokens(chunk['chunk_text'])
+            if current_window and (current_tokens + chunk_tokens) > max_tokens:
+                windows.append(current_window)
+                # Overlap: start next window with last N chunks of current
+                overlap = current_window[-FULL_CONTEXT_OVERLAP:]
+                current_window = list(overlap)
+                current_tokens = sum(self._estimate_tokens(c['chunk_text']) for c in overlap)
+            current_window.append(chunk)
+            current_tokens += chunk_tokens
+
+        if current_window:
+            windows.append(current_window)
+
+        return windows
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=2, min=10, max=60),
+        retry=retry_if_exception_type((anthropic.RateLimitError, anthropic.APIStatusError))
+    )
+    def _call_llm_full_context(self, all_params: List[Dict], context: str) -> str:
+        """LLM call with FULL document context and ALL parameters.
+
+        Unlike _call_llm_batch which sees only vector-searched chunks,
+        this sees the complete document text — matching Claude Web behavior.
+        """
+        # Compact param list — save tokens in prompt
+        param_list = "\n".join(
+            f'- [{p["name"]}] {p["display_name"]} ({", ".join(p["expected_units"][:3])})'
+            for p in all_params
+        )
+
+        prompt = f"""Extract ALL {len(all_params)} parameters from the COMPLETE document text below.
+
+You have the FULL document — every parameter that exists MUST be found.
+Use domain expertise: recognize different terminology (e.g. "60mm visible profile" = Face Width of Mullion).
+
+PARAMETERS:
+{param_list}
+
+DOCUMENT TEXT:
+{context}
+
+RULES:
+- found=true if ANY relevant data exists, even partial/implied/derivable
+- value: concise string with key sub-values
+- confidence: 0.9+ explicit, 0.7-0.9 inferred, 0.5-0.7 partial
+- source_numbers: list of source numbers [1,2,...] with relevant info
+- explanation: MAX 15 words — keep very brief to avoid response truncation
+- EVERY parameter MUST appear in output
+
+Return ONLY valid JSON — one key per parameter:
+{{"param_name": {{"found":true,"value":"val","value_numeric":null,"unit":"u","confidence":0.9,"source_numbers":[1],"explanation":"brief"}}, ...}}"""
+
+        response = self.anthropic.messages.create(
+            model=MODEL,
+            max_tokens=FULL_CONTEXT_MAX_RESPONSE,
+            temperature=0.05,
+            system=(
+                "You are an expert facade engineer extracting technical parameters "
+                "from complete tender documents. You have the FULL document text — "
+                "extract every parameter thoroughly. Always return valid JSON."
+            ),
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.content[0].text
+
+    async def _extract_full_context_async(
+        self,
+        project_id: str,
+        facade_parameters: List[Dict],
+    ) -> List[Dict]:
+        """Pass 1: Full-context extraction — send ALL document text to the LLM.
+
+        Fetches all parent chunks from PostgreSQL (no Pinecone), splits into
+        context windows, and makes one LLM call per window with ALL parameters.
+        Merges results across windows keeping highest-confidence per param.
+        """
+        t_start = time.perf_counter()
+        loop = asyncio.get_running_loop()
+
+        # ── Fetch all parent chunks from DB ──
+        parent_dicts = await loop.run_in_executor(
+            None, self._fetch_all_parent_chunks, project_id
+        )
+        total_tokens = sum(self._estimate_tokens(c['chunk_text']) for c in parent_dicts)
+        logger.info(
+            f"[FULL_CONTEXT] {len(parent_dicts)} parent chunks, "
+            f"~{total_tokens:,} tokens total"
+        )
+
+        if not parent_dicts:
+            logger.warning("[FULL_CONTEXT] No chunks found — skipping full-context pass")
+            return [{'parameter_name': p['name'], 'found': False, 'reason': 'No document content'} for p in facade_parameters]
+
+        # ── Split into context windows ──
+        windows = self._build_context_windows(parent_dicts)
+        logger.info(
+            f"[FULL_CONTEXT] Split into {len(windows)} context windows "
+            f"(~{FULL_CONTEXT_WINDOW_TOKENS:,} tokens each, {FULL_CONTEXT_OVERLAP} overlap)"
+        )
+
+        # ── Fire LLM calls for all windows in parallel ──
+        semaphore = _get_llm_semaphore()
+
+        async def _process_window(window_idx: int, window_chunks: List[Dict]) -> List[Dict]:
+            context = self._build_full_context(window_chunks)
+            t0 = time.perf_counter()
+            try:
+                async with semaphore:
+                    response_text = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            None, self._call_llm_full_context, facade_parameters, context
+                        ),
+                        timeout=240.0,  # generous timeout for full-context calls
+                    )
+            except asyncio.TimeoutError:
+                logger.error(f"[FULL_CONTEXT] Window {window_idx+1} timed out (240s)")
+                return []
+            except Exception as e:
+                logger.error(f"[FULL_CONTEXT] Window {window_idx+1} LLM error: {e}")
+                return []
+
+            elapsed = time.perf_counter() - t0
+            logger.info(
+                f"[FULL_CONTEXT] Window {window_idx+1}/{len(windows)} "
+                f"LLM: {elapsed:.2f}s | response: {len(response_text)} chars"
+            )
+
+            # ── Truncation detection: try parsing, if it fails try to salvage ──
+            results = self._parse_batch_response(response_text, facade_parameters, window_chunks)
+
+            # Check if most params came back as "JSON parse failed" — indicates truncation
+            parse_failures = sum(1 for r in results if r.get('reason') == 'JSON parse failed')
+            if parse_failures == len(facade_parameters):
+                logger.warning(
+                    f"[FULL_CONTEXT] Window {window_idx+1} — entire response unparseable "
+                    f"({len(response_text)} chars). Attempting partial JSON recovery…"
+                )
+                results = self._recover_truncated_json(response_text, facade_parameters, window_chunks)
+
+            return results
+
+        window_tasks = [
+            _process_window(i, w) for i, w in enumerate(windows)
+        ]
+        window_results = await asyncio.gather(*window_tasks, return_exceptions=True)
+
+        # ── Merge across windows: keep highest-confidence found=true per param ──
+        best: Dict[str, Dict] = {}
+        for wr in window_results:
+            if isinstance(wr, Exception):
+                logger.error(f"[FULL_CONTEXT] Window exception: {wr}")
+                continue
+            for result in wr:
+                pname = result.get('parameter_name')
+                if not pname:
+                    continue
+                existing = best.get(pname)
+                if not existing:
+                    best[pname] = result
+                elif result.get('found') and (
+                    not existing.get('found')
+                    or result.get('confidence', 0) > existing.get('confidence', 0)
+                ):
+                    best[pname] = result
+
+        # Build final list preserving parameter order
+        all_results = []
+        for p in facade_parameters:
+            r = best.get(p['name'])
+            if r:
+                all_results.append(r)
+            else:
+                all_results.append({'parameter_name': p['name'], 'found': False, 'reason': 'Not in any window response'})
+
+        found_count = sum(1 for r in all_results if r.get('found'))
+        logger.info(
+            f"[FULL_CONTEXT] Done — {found_count}/{len(all_results)} found — "
+            f"{time.perf_counter()-t_start:.2f}s"
+        )
+        return all_results
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # PASS 2: VECTOR-SEARCH FALLBACK (for params missed by full-context)
+    # ══════════════════════════════════════════════════════════════════════════
 
     # ── Batch LLM call ────────────────────────────────────────────────────────
 
@@ -286,6 +545,91 @@ IMPORTANT for found=false: explanation MUST state (a) what terms were searched f
             results.append(result)
         return results
 
+    def _recover_truncated_json(
+        self,
+        response_text: str,
+        batch_params: List[Dict],
+        chunk_dicts: List[Dict],
+    ) -> List[Dict]:
+        """Attempt to recover params from a truncated JSON response.
+
+        When the LLM runs out of output tokens, the JSON is cut off mid-object.
+        Strategy: find the last complete parameter entry and parse up to that point.
+        """
+        clean = re.sub(r"^```(?:json)?\s*|\s*```$", "", response_text.strip(), flags=re.MULTILINE)
+
+        # Try progressively trimming from the end to find valid JSON
+        # Look for the last complete "}" that closes a parameter entry
+        recovered: Dict = {}
+        last_brace = len(clean)
+        for _ in range(50):  # try up to 50 trim attempts
+            last_brace = clean.rfind("}", 0, last_brace)
+            if last_brace <= 0:
+                break
+            # Try closing the outer object
+            candidate = clean[:last_brace + 1]
+            # Count braces to see if we need to close
+            open_braces = candidate.count("{") - candidate.count("}")
+            candidate += "}" * open_braces  # close any unclosed braces
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, dict):
+                    # Unwrap single wrapper key if present
+                    if len(parsed) == 1:
+                        only_key = next(iter(parsed))
+                        if only_key not in [p['name'] for p in batch_params] and isinstance(parsed[only_key], dict):
+                            parsed = parsed[only_key]
+                    recovered = parsed
+                    break
+            except json.JSONDecodeError:
+                continue
+
+        if not recovered:
+            logger.error(f"[RECOVERY] Could not recover any params from truncated JSON")
+            return [{'parameter_name': p['name'], 'found': False, 'reason': 'JSON truncated'} for p in batch_params]
+
+        logger.info(f"[RECOVERY] Recovered {len(recovered)} params from truncated response")
+
+        # Parse recovered params through the standard logic
+        results = []
+        for param in batch_params:
+            raw = recovered.get(param['name'])
+            if not isinstance(raw, dict):
+                results.append({'parameter_name': param['name'], 'found': False, 'reason': 'Missing (truncated)'})
+                continue
+
+            raw_conf = float(raw.get('confidence', 0.0))
+            explanation_text = raw.get('explanation', '').lower()
+            _inference_signals = ('inferred', 'assumed', 'estimated', 'approximately',
+                                  'likely', 'probably', 'implied', 'not explicitly')
+            if raw_conf > 0.75 and any(sig in explanation_text for sig in _inference_signals):
+                raw_conf = 0.75
+            if raw.get('found') and not raw.get('value'):
+                raw_conf = 0.0
+
+            result = {
+                'parameter_name': param['name'],
+                'found':          bool(raw.get('found')),
+                'value':          raw.get('value'),
+                'value_numeric':  raw.get('value_numeric'),
+                'unit':           raw.get('unit'),
+                'confidence':     raw_conf,
+                'explanation':    raw.get('explanation', ''),
+            }
+            if result['found']:
+                source_meta, all_sources, all_pages = self._parse_sources(
+                    raw.get('source_numbers', []), chunk_dicts
+                )
+                result['source_metadata'] = source_meta
+                result['all_sources']     = all_sources
+                result['all_pages']       = all_pages
+            else:
+                result['source_metadata'] = {}
+                result['all_sources']     = []
+                result['all_pages']       = []
+            results.append(result)
+        return results
+
     # ── Single-param LLM call (kept for fallback / legacy) ───────────────────
 
     @retry(
@@ -353,25 +697,26 @@ If found=false, explanation must clearly state: what terms were searched, what (
 
     def _store_extraction(self, project_id: str, param_config: Dict, extraction: Dict):
         t0 = time.perf_counter()
-        source_meta = extraction.get('source_metadata', {})
-        all_pages   = extraction.get('all_pages', [])
+        found = extraction.get('found', False)
+        source_meta = extraction.get('source_metadata', {}) if found else {}
+        all_pages   = extraction.get('all_pages', []) if found else []
 
         from sqlalchemy.dialects.postgresql import insert as pg_insert
 
         fields = dict(
             parameter_display_name = param_config['display_name'],
-            value_text             = extraction.get('value'),
-            value_numeric          = extraction.get('value_numeric'),
-            unit                   = extraction.get('unit'),
+            value_text             = extraction.get('value') if found else None,
+            value_numeric          = extraction.get('value_numeric') if found else None,
+            unit                   = extraction.get('unit') if found else None,
             source_document_id     = source_meta.get('document_id'),
             source_page_number     = source_meta.get('page'),
             source_pages           = json.dumps(all_pages) if all_pages else None,
             source_section         = source_meta.get('section'),
             source_subsection      = source_meta.get('subsection'),
             source_chunk_id        = source_meta.get('chunk_id'),
-            confidence_score       = extraction.get('confidence', 0.0),
-            extraction_method      = 'llm_batch',
-            notes                  = extraction.get('explanation'),
+            confidence_score       = extraction.get('confidence', 0.0) if found else 0.0,
+            extraction_method      = 'llm_full_context' if found else 'llm_full_context',
+            notes                  = extraction.get('explanation') or extraction.get('reason'),
             all_sources            = json.dumps(extraction.get('all_sources', [])),
         )
 
@@ -640,7 +985,9 @@ If found=false, explanation must clearly state: what terms were searched, what (
             )
             return results
 
-    # ── Main async entry point ────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════════
+    # MAIN ENTRY POINT: Three-pass extraction
+    # ══════════════════════════════════════════════════════════════════════════
 
     async def extract_all_parameters_async(
         self,
@@ -649,96 +996,137 @@ If found=false, explanation must clearly state: what terms were searched, what (
         max_concurrent: int = 6,
         num_docs: int = 1,
     ) -> List[Dict]:
-        """Extract all parameters using batched LLM calls (BATCH_SIZE params per call)."""
-        t_all_start = time.perf_counter()
+        """Extract parameters using a three-pass strategy for maximum accuracy.
 
-        # Split into batches
-        batches = [
-            facade_parameters[i:i + BATCH_SIZE]
-            for i in range(0, len(facade_parameters), BATCH_SIZE)
-        ]
-        n_batches = len(batches)
+        Pass 1: FULL CONTEXT — send ALL document text, extract ALL params (like Claude Web)
+        Pass 2: VECTOR SEARCH — targeted Pinecone search for still-missing params
+        Pass 3: STORE — merge and persist all results
+        """
+        t_all_start = time.perf_counter()
         logger.info(
-            f"[TIMING][EXTRACT_ALL] {len(facade_parameters)} params → "
-            f"{n_batches} batches of ≤{BATCH_SIZE} | max_concurrent={max_concurrent}"
+            f"[EXTRACT_ALL] Starting 3-pass extraction for {len(facade_parameters)} params "
+            f"| {num_docs} docs"
         )
 
-        semaphore = asyncio.Semaphore(max_concurrent)
-        tasks = [
-            self._extract_batch_async(project_id, batch, semaphore, num_docs)
-            for batch in batches
-        ]
+        # ── Create extraction run record ──
+        self._current_run_id = None
+        try:
+            import uuid as _uuid
+            from models.extraction_run import ExtractionRun
+            run_id = _uuid.uuid4()
+            run_session = self.session_factory() if self.session_factory else self.db
+            try:
+                run = ExtractionRun(
+                    run_id=run_id,
+                    project_id=project_id,
+                    total_params=len(facade_parameters),
+                    status="running",
+                )
+                run_session.add(run)
+                run_session.commit()
+                self._current_run_id = run_id
+                logger.info(f"[EXTRACT_ALL] Created extraction run {run_id}")
+            finally:
+                if self.session_factory and run_session is not self.db:
+                    run_session.close()
+        except Exception as e:
+            logger.warning(f"[EXTRACT_ALL] Could not create extraction run record: {e}")
 
-        batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Flatten first-pass results
-        all_results: List[Dict] = []
-        for batch_params, batch_result in zip(batches, batch_results):
-            if isinstance(batch_result, Exception):
-                logger.error(f"Batch exception: {batch_result}")
-                for p in batch_params:
-                    all_results.append({'parameter_name': p['name'], 'found': False, 'reason': str(batch_result)})
-            else:
-                all_results.extend(batch_result)
-
-        first_pass_found = sum(1 for r in all_results if r.get('found'))
+        # ═══════════ PASS 1: Full-context extraction ═══════════
+        all_results = await self._extract_full_context_async(
+            project_id, facade_parameters
+        )
+        pass1_found = sum(1 for r in all_results if r.get('found'))
         logger.info(
-            f"[TIMING][EXTRACT_ALL] First pass: {first_pass_found}/{len(all_results)} found — "
+            f"[EXTRACT_ALL] Pass 1 (full context): {pass1_found}/{len(all_results)} found — "
             f"{time.perf_counter()-t_all_start:.2f}s"
         )
 
-        # ── Retry pass: re-batch all not-found params with broader search ──────
-        # Uses alternate keywords + higher top_k to catch params that were missed
-        # due to search query mismatch. One efficient batch, not per-param calls.
+        # ═══════════ PASS 2: Vector-search fallback for not-found params ═══════════
         not_found_names = {r['parameter_name'] for r in all_results if not r.get('found')}
         retry_params = [p for p in facade_parameters if p['name'] in not_found_names]
 
         if retry_params:
             logger.info(
-                f"[RETRY] {len(retry_params)} not-found params — running retry pass"
+                f"[EXTRACT_ALL] Pass 2 (vector search): {len(retry_params)} not-found params"
             )
+            # Use smaller batch size for more focused context per param
+            retry_batch_size = 5
             retry_batches = [
-                retry_params[i:i + BATCH_SIZE]
-                for i in range(0, len(retry_params), BATCH_SIZE)
+                retry_params[i:i + retry_batch_size]
+                for i in range(0, len(retry_params), retry_batch_size)
             ]
+            semaphore = asyncio.Semaphore(max_concurrent)
             retry_tasks = [
-                self._extract_batch_async_retry(project_id, batch, semaphore, num_docs)
+                self._extract_batch_async(project_id, batch, semaphore, num_docs)
                 for batch in retry_batches
             ]
             retry_results_raw = await asyncio.gather(*retry_tasks, return_exceptions=True)
 
-            # Merge retry results: override not-found with found
+            # Merge: override not-found with found from vector search
             retry_map: Dict[str, Dict] = {}
             for rb, rr in zip(retry_batches, retry_results_raw):
                 if isinstance(rr, Exception):
-                    logger.error(f"[RETRY] Batch exception: {rr}")
+                    logger.error(f"[EXTRACT_ALL] Pass 2 batch exception: {rr}")
                     continue
                 for r in rr:
                     if r.get('found'):
                         retry_map[r['parameter_name']] = r
 
             if retry_map:
-                logger.info(f"[RETRY] Recovered {len(retry_map)} params: {list(retry_map.keys())}")
+                logger.info(
+                    f"[EXTRACT_ALL] Pass 2 recovered {len(retry_map)} params: "
+                    f"{list(retry_map.keys())}"
+                )
                 for i, result in enumerate(all_results):
                     pname = result.get('parameter_name')
                     if pname in retry_map:
                         all_results[i] = retry_map[pname]
 
-        # Persist found results
+        # ═══════════ PASS 3: Persist ALL results (found + not-found) ═══════════
         found_count = 0
         param_map = {p['name']: p for p in facade_parameters}
         for result in all_results:
             if result.get('found'):
                 found_count += 1
-                pname = result.get('parameter_name')
-                param_config = param_map.get(pname)
-                if param_config:
-                    self._store_extraction(project_id, param_config, result)
+            pname = result.get('parameter_name')
+            param_config = param_map.get(pname)
+            if param_config:
+                self._store_extraction(project_id, param_config, result)
+
+        pass2_recovered = found_count - pass1_found
+        extraction_time = time.perf_counter() - t_all_start
+
+        # ── Update extraction run record if present ──
+        if hasattr(self, '_current_run_id') and self._current_run_id:
+            try:
+                from models.extraction_run import ExtractionRun
+                from datetime import datetime
+                run_session = self.session_factory() if self.session_factory else self.db
+                try:
+                    run = run_session.query(ExtractionRun).filter(
+                        ExtractionRun.run_id == self._current_run_id
+                    ).first()
+                    if run:
+                        run.completed_at = datetime.utcnow()
+                        run.total_params = len(all_results)
+                        run.found_count = found_count
+                        run.not_found_count = len(all_results) - found_count
+                        run.pass1_found = pass1_found
+                        run.pass2_found = pass2_recovered
+                        run.extraction_time_seconds = round(extraction_time, 2)
+                        run.status = "completed"
+                        run_session.commit()
+                finally:
+                    if self.session_factory and run_session is not self.db:
+                        run_session.close()
+            except Exception as e:
+                logger.warning(f"[EXTRACT_ALL] Failed to update extraction run: {e}")
 
         logger.info(
-            f"[TIMING][EXTRACT_ALL] Done — {found_count}/{len(all_results)} found "
-            f"(first pass: {first_pass_found}, retry: {found_count - first_pass_found}) — "
-            f"total: {time.perf_counter()-t_all_start:.2f}s"
+            f"[EXTRACT_ALL] Done — {found_count}/{len(all_results)} found "
+            f"(pass1: {pass1_found}, pass2: +{pass2_recovered}) — "
+            f"total: {extraction_time:.2f}s"
         )
         return all_results
 
