@@ -597,8 +597,14 @@ async def _run_pipeline_inner(project_id: uuid.UUID):
         # chunks are in Pinecone and can answer BOQ-related parameters.
         total_indexed = indexed_spec_count + len(boq_docs)
         if total_indexed > 0:
+            # Filter parameters by project type (commercial/residential)
+            p_type = project.project_type or "commercial"
+            filtered_params = [
+                p for p in FACADE_PARAMETERS
+                if p.get("project_type", "both") in ("both", p_type)
+            ]
             project.pipeline_step = (
-                f"Extracting {len(FACADE_PARAMETERS)} parameters across {total_indexed} document(s)…"
+                f"Extracting {len(filtered_params)} parameters across {total_indexed} document(s)…"
             )
             db.commit()
             db.expire_all()
@@ -612,7 +618,7 @@ async def _run_pipeline_inner(project_id: uuid.UUID):
             t_extract = _time.perf_counter()
             extractions = await extractor.extract_all_parameters_async(
                 str(project_id),
-                facade_parameters=FACADE_PARAMETERS,
+                facade_parameters=filtered_params,
                 max_concurrent=6,
                 num_docs=total_indexed,
             )
@@ -712,12 +718,19 @@ async def re_extract_parameters(
                 _proj.pipeline_step = "Re-extracting parameters from all documents…"
                 _db.commit()
 
-            # Count already-processed spec docs so top_k / max_sources scale correctly
-            spec_count = _db.query(Document).filter(
+            # Count already-processed docs so top_k / max_sources scale correctly
+            doc_count = _db.query(Document).filter(
                 Document.project_id == pid,
-                Document.file_type.in_(['pdf_spec', 'docx_spec']),
                 Document.processed == True,
             ).count()
+
+            # Filter parameters by project type
+            p_type = _proj.project_type if _proj else "commercial"
+            filtered_params = [
+                p for p in FACADE_PARAMETERS
+                if p.get("project_type", "both") in ("both", p_type)
+            ]
+            _pipeline_log.info(f"[RE-EXTRACT] {len(filtered_params)} params for {p_type} project")
 
             extractor = ParameterExtractor(
                 pinecone_index=pinecone_index,
@@ -727,9 +740,9 @@ async def re_extract_parameters(
             )
             extractions = await extractor.extract_all_parameters_async(
                 str(pid),
-                facade_parameters=FACADE_PARAMETERS,
+                facade_parameters=filtered_params,
                 max_concurrent=5,
-                num_docs=max(1, spec_count),
+                num_docs=max(1, doc_count),
             )
             found_count = len([e for e in extractions if e.get("found")])
             _pipeline_log.info(f"[RE-EXTRACT] Done — {found_count}/{len(extractions)} parameters found")

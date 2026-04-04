@@ -20,6 +20,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['wind load', 'wind pressure', 'design wind', 'wind force', 'basic wind speed', 'wind zone', 'terrain category', 'IS 875', 'ASCE 7', 'EN 1991'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'wind_load_zoning',
@@ -29,6 +31,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['wind load zoning', 'wind zone', 'pressure zone', 'corner zone', 'edge zone', 'wind pressure coefficient', 'Cpe', 'Cpi'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'glass_thickness_vision_spandrel',
@@ -38,6 +42,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['vision glass', 'spandrel glass', 'fixed glass thickness', 'glass makeup', 'IGU', 'insulating glass unit', 'double glazed', 'glass specification', 'glass build-up'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'glass_thickness_openable',
@@ -47,6 +53,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['openable glass', 'opening panel glass', 'casement glass', 'operable glazing', 'vent glass', 'opening light glass', 'glazing thickness openable'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'panel_modulation',
@@ -56,6 +64,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['panel modulation', 'panel size', 'grid spacing', 'bay spacing', 'module width', 'module height', 'facade grid', 'typical panel'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'bmu_load',
@@ -65,6 +75,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['BMU', 'building maintenance unit', 'cradle load', 'gondola load', 'facade access', 'maintenance unit load', 'window cleaning', 'davit', 'monorail'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'lighting_provision',
@@ -74,6 +86,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['lighting provision', 'facade lighting', 'integrated lighting', 'LED', 'lighting load', 'fin lighting', 'illumination', 'light fitting'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'panel_typologies',
@@ -83,6 +97,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['panel typology', 'panel types', 'facade types', 'typical panel', 'corner panel', 'refuge panel', 'starter panel', 'panel variation'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'structural_member_wall_thickness',
@@ -92,6 +108,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['wall thickness', 'member thickness', 'aluminium thickness', 'mullion thickness', 'transom thickness', 'profile thickness', 'extrusion thickness'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'material_of_gasket',
@@ -101,6 +119,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['gasket material', 'EPDM gasket', 'silicone gasket', 'TPE gasket', 'microwave gasket', 'rubber gasket', 'gasket specification', 'weather seal'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'no_of_barriers',
@@ -110,6 +130,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['number of barriers', 'no. of barriers', 'handrail', 'balustrade', 'guard rail', 'safety barrier', 'railing', 'parapet'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'stack_height',
@@ -119,6 +141,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['stack height', 'storey height', 'floor height', 'floor-to-floor', 'slab to slab', 'inter-floor height'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'vertical_stack_movement',
@@ -128,6 +152,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['vertical stack movement', 'vertical movement', 'stack deflection', 'axial movement', 'slab deflection', 'differential movement'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'bracket_type',
@@ -137,6 +163,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['bracket type', 'J bracket', 'L bracket', 'fixing bracket', 'slab bracket', 'anchor bracket', 'facade bracket', 'fixing type'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'water_tightness',
@@ -146,6 +174,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['water tightness', 'water resistance', 'water penetration', 'watertight', 'EN 12155', 'EN 12154', 'water test pressure', 'watertightness class'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'air_permeability',
@@ -155,6 +185,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['air permeability', 'air leakage', 'air infiltration', 'air tightness', 'EN 12153', 'EN 12152', 'air leakage class'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'seismic',
@@ -164,6 +196,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['seismic', 'earthquake', 'seismic zone', 'zone factor', 'importance factor', 'inter-storey drift', 'IS 1893', 'seismic coefficient'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'acoustic_rating',
@@ -173,6 +207,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['acoustic', 'sound insulation', 'noise reduction', 'Rw', 'STC', 'OITC', 'sound reduction index', 'dB'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'u_value',
@@ -182,6 +218,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['u value', 'u-value', 'thermal transmittance', 'Uw', 'Uf', 'Ug', 'thermal performance', 'heat transfer'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'signage_load',
@@ -191,6 +229,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['signage load', 'sign load', 'signage weight', 'facade signage', 'external signage'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'horizontal_movement',
@@ -200,6 +240,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['horizontal movement', 'inter-storey drift', 'lateral movement', 'racking movement', 'storey drift', 'H/200', 'H/300'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'face_width_of_mullion',
@@ -209,6 +251,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['face width', 'mullion width', 'face width of mullion', 'visible width', 'sightline width'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'no_of_locking_points',
@@ -218,6 +262,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['locking points', 'number of locks', 'multi-point lock', 'locking mechanism', 'lock count'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'sealant_bite',
@@ -227,6 +273,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['sealant bite', 'silicone bite', 'structural silicone', 'sealant width', 'sealant contact', 'bite width'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'dead_load_sill_transom',
@@ -236,6 +284,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['dead load sill', 'dead load transom', 'glass support dead load', 'sill dead load', '100% dead load', 'glass dead load'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'dead_load_glass_support_openable',
@@ -245,6 +295,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['dead load openable', 'glass support openable', 'openable dead load', '100% dead load openable'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'distance_slab_to_mullion',
@@ -254,6 +306,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['slab to mullion', 'slab edge distance', 'facade setback', 'mullion offset', 'slab face to mullion'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'load_of_canopy',
@@ -263,6 +317,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['canopy load', 'load of canopy', 'canopy weight', 'canopy fixing load', 'entrance canopy'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'load_of_catwalk',
@@ -272,6 +328,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['catwalk load', 'load of catwalk', 'access catwalk', 'maintenance catwalk', 'walkway load'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'inserts_required',
@@ -281,6 +339,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['inserts required', 'structural insert', 'mullion insert', 'steel insert', 'insert coating', 'insert scope'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'movement_slab_bracket',
@@ -290,6 +350,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['slab mounted bracket', 'bracket movement', 'adjustable bracket', 'bracket adjustment range', 'fixing bracket movement'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'location_restrain_pin',
@@ -299,6 +361,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['restrain pin', 'restraint pin', 'restraint location', 'pin location', 'structural restraint'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'gutter_sleeve',
@@ -308,6 +372,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['gutter sleeve', 'sleeve length', 'gutter thickness', 'drainage sleeve'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'openable_edge_guard',
@@ -317,6 +383,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['edge guard', 'openable edge guard', 'first barrier gasket', 'barrier gasket', 'edge seal'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'drip_bar_edge_guard',
@@ -326,6 +394,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['drip bar', 'drip edge', 'edge guard openable', 'drip moulding'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'structural_adequacy_open',
@@ -335,6 +405,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['structural adequacy', 'open condition', 'open position structural', 'wind load open'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'deflection_criteria',
@@ -344,6 +416,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['deflection limit', 'deflection criteria', 'allowable deflection', 'L/175', 'L/200', 'L/150', 'span deflection', 'mullion deflection'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'fire_rating',
@@ -353,6 +427,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['fire rating', 'fire resistance', 'fire performance', 'EI 60', 'EI 90', 'fire class', 'EN 13501', 'BS 476', 'IS 3809'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'testing_standards',
@@ -362,6 +438,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['testing standards', 'mock-up', 'prototype test', 'field test', 'laboratory test', 'onsite test', 'offsite test', 'AAMA 501', 'CWCT'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'surface_finish',
@@ -371,6 +449,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['surface finish', 'coating', 'powder coating', 'anodising', 'PVDF', 'AAMA 2603', 'AAMA 2604', 'AAMA 2605', 'colour', 'finish specification'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'corrosion_class',
@@ -380,6 +460,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['corrosion class', 'corrosion resistance', 'corrosion protection', 'EN 1670', 'galvanic protection', 'marine grade'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'durability_test',
@@ -389,6 +471,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['durability test', 'durability requirement', 'cycling test', 'fatigue test', 'endurance test', 'operating cycles'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'live_load_railing',
@@ -398,6 +482,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['live load railing', 'railing load', 'balustrade load', 'handrail load', 'guard rail load'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'operating_force',
@@ -407,6 +493,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['operating force', 'disengaging force', 'sliding force', 'opening force', 'handle force'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'easy_clean_system',
@@ -416,6 +504,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['easy clean', 'tilt clean', 'self-cleaning glass', 'cleaning access', 'maintenance access', 'tilt-in sash', 'Pilkington Activ', 'SGG Bioclean'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'limiting_stay',
@@ -425,6 +515,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['limiting stay', 'window restrictor', 'opening restrictor', 'friction stay', 'stay arm', 'opening limiter', 'child safety device'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'door_closure_required',
@@ -434,6 +526,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['door closure', 'door closer', 'concealed closer', 'overhead closer', 'door closing device'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'ss_screws_visible',
@@ -443,6 +537,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['stainless steel screws visible', 'SS 316 visible', 'SS 304 visible', 'hardware visible area', 'exposed fasteners'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'ss_screws_non_visible',
@@ -452,6 +548,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['stainless steel screws non-visible', 'SS 316 concealed', 'SS 304 concealed', 'hardware non-visible', 'concealed fasteners'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'aluminium_alloy',
@@ -461,6 +559,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['aluminium alloy', '6063', '6060', 'alloy specification', 'extrusion alloy', 'T5', 'T6'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'shims',
@@ -470,6 +570,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['shims', 'HDG shims', 'PVC shims', 'packing plates', 'levelling plates', 'liner plates', 'bearing pads'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'pmu_requirement',
@@ -479,6 +581,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['PMU', 'performance mock-up', 'mock up requirement', 'PMU size', 'prototype mock-up', 'PMU test'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'vmu_requirement',
@@ -488,6 +592,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['VMU', 'visual mock-up', 'visual mockup', 'VMU requirement', 'sample board', 'visual sample'],
         'source_types': ['pdf_spec', 'docx_spec', 'pdf_drawing', 'dxf_drawing', 'dwg_drawing'],
+    
+        'project_type': 'residential',
     },
 
     # ══════════════════════════════════════════════════════════════
@@ -502,6 +608,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['elevation drawing', 'facade elevation', 'external elevation', 'elevation sheet'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'drawing_plan',
@@ -511,6 +619,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['plan drawing', 'floor plan', 'facade plan', 'plan view'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'drawing_section',
@@ -520,6 +630,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['section drawing', 'cross section', 'vertical section', 'horizontal section', 'facade section'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'drawing_pe_typical',
@@ -529,6 +641,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['PE typical', 'panel elevation typical', 'corner PE', 'terrace PE', 'starter area PE', 'panel elevation corner'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'drawing_pe_refuge',
@@ -538,6 +652,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['PE refuge', 'refuge area', 'refuge floor elevation', 'panel elevation refuge'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'drawing_railing_interface',
@@ -547,6 +663,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['railing interface', 'balustrade interface', 'handrail interface', 'railing connection detail'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'drawing_pe_non_typical',
@@ -556,6 +674,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['PE non-typical', 'non typical area', 'special area elevation', 'non standard panel'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'fin_details',
@@ -565,6 +685,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['fin details', 'fin width', 'fin depth', 'fin shape', 'vertical fin', 'horizontal fin', 'solar fin', 'decorative fin'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'openable_location_elevation_plan',
@@ -574,6 +696,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['openable location', 'window location elevation', 'openable in plan', 'window position elevation', 'vent location'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'coping_details',
@@ -583,6 +707,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['coping details', 'parapet coping', 'coping profile', 'top coping', 'wall coping'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'corner_details',
@@ -592,6 +718,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['corner details', 'inner corner', 'outer corner', 'split mullion corner', 'single mullion corner', 'corner junction'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'variable_angle',
@@ -601,6 +729,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['variable angle', 'angled facade', 'non-orthogonal', 'sloped facade', 'angle mullion'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'variable_gasket',
@@ -610,6 +740,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['variable gasket', 'special gasket', 'custom gasket', 'non-standard gasket'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'variable_angle_mullion_semi_unitised',
@@ -619,6 +751,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['variable angle mullion', 'semi unitised angle', 'angled semi-unitised', 'variable mullion angle'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'top_bottom_flashing',
@@ -628,6 +762,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['top flashing', 'bottom flashing', 'flashing insulation', 'head flashing', 'sill flashing', 'closure piece'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'semi_unitised_glass_support',
@@ -637,6 +773,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['semi unitised glass support', 'glass cleat', 'glass support cleat', 'semi-unitised cleat'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'gasket_transom_mullion',
@@ -646,6 +784,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['transom gasket', 'mullion gasket', 'transom mullion interface gasket', 'weather gasket'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'intermediate_transom_edge_guard',
@@ -655,6 +795,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['intermediate transom', 'edge guard transom', 'transom edge guard', 'concealed screw transom'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'acp_band_interface',
@@ -664,6 +806,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['ACP band', 'ACP interface', 'composite panel interface', 'ACP curtain wall junction'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'horizontal_fin_details',
@@ -673,6 +817,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['horizontal fin', 'sun shading fin', 'horizontal louvre fin', 'brise soleil'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'fin_lightning_provision',
@@ -682,6 +828,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['fin lightning', 'lightning provision fin', 'lightning protection fin', 'earthing fin'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'canopy_details',
@@ -691,6 +839,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['canopy details', 'entrance canopy', 'canopy design', 'canopy fixing'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'catwalk_details',
@@ -700,6 +850,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['catwalk', 'maintenance walkway', 'access catwalk', 'facade catwalk'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'louvers_details',
@@ -709,6 +861,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['louvers', 'louvres', 'louvre details', 'louvre shape', 'louvre location', 'ventilation louvre'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'mullion_sleeve_length',
@@ -718,6 +872,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['mullion sleeve', 'sleeve length', 'coupling sleeve', 'mullion coupling', 'semi-unitised sleeve'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'wind_load_brackets_dead_load',
@@ -727,6 +883,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['wind load bracket', 'dead load bracket', 'facade bracket wind', 'bracket dead load'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'flashings',
@@ -736,6 +894,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['flashing', 'flashings', 'sill flashing', 'head flashing', 'parapet flashing', 'junction flashing'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'waterproofing_membrane',
@@ -745,6 +905,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['waterproofing membrane', 'waterproof membrane', 'WP membrane', 'slab waterproofing', 'balcony waterproofing'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'subframes',
@@ -754,6 +916,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['subframe', 'sub frame', 'window subframe', 'door subframe', 'subframe requirement', 'structural subframe'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'perimeter_tubes',
@@ -763,6 +927,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['perimeter tube', 'perimeter rectangular tube', 'toggle system tube', 'UCW perimeter', 'curtain wall perimeter tube'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'fin_bracket_bolts',
@@ -772,6 +938,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['fin bracket', 'fin bolt', 'bracket bolt', 'fin fixing bracket', 'fin anchor'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'mullion_structural_design',
@@ -781,6 +949,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['mullion structural design', 'mullion design principle', 'double box mullion', 'single box mullion', 'mullion cross section'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'slider_types',
@@ -790,6 +960,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['slider type', 'lift and slide', 'panorama slider', 'fold and slide', 'sliding window type', 'PD slider'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'openable_types',
@@ -799,6 +971,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['side hung', 'top hung', 'tilt and turn', 'bottom hung', 'double openable', 'horizontal pivot', 'vertical pivot', 'tilt and slide', 'openable type'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'chajja_details',
@@ -808,6 +982,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['chajja', 'sun shade', 'projection', 'chajja width', 'chajja depth', 'chajja shape'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'no_of_floors',
@@ -817,6 +993,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['number of floors', 'no of floors', 'total floors', 'floor count', 'storey count', 'building height floors'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'gutter_type',
@@ -826,6 +1004,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['gutter integrated', 'third party gutter', 'gutter system', 'drainage gutter', 'facade gutter'],
         'source_types': ['pdf_drawing', 'dxf_drawing', 'dwg_drawing', 'pdf_spec', 'docx_spec'],
+    
+        'project_type': 'residential',
     },
 
     # ══════════════════════════════════════════════════════════════
@@ -840,6 +1020,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['glazing area', 'facade area', 'curtain wall area', 'total area', 'window area', 'BOQ area'],
         'source_types': ['pdf_spec', 'docx_spec', 'excel_boq'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'handle_for_openable',
@@ -849,6 +1031,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['handle openable', 'window handle', 'offset handle', 'straight handle', 'espagnolette', 'tilt and turn handle'],
         'source_types': ['pdf_spec', 'docx_spec', 'excel_boq'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'handle_lockable',
@@ -858,6 +1042,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['lockable handle', 'non-lockable handle', 'custodian handle', 'key lockable', 'restricted handle'],
         'source_types': ['pdf_spec', 'docx_spec', 'excel_boq'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'outside_pull_handle',
@@ -867,6 +1053,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['outside pull handle', 'external handle', 'outside handle', 'pull handle'],
         'source_types': ['pdf_spec', 'docx_spec', 'excel_boq'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'hardware_specification',
@@ -876,6 +1064,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['hardware specification', 'hardware brand', 'hardware grade', 'fitting specification', 'hardware make'],
         'source_types': ['pdf_spec', 'docx_spec', 'excel_boq'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'threshold_type',
@@ -885,6 +1075,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['door threshold', 'threshold type', 'flat threshold', 'low threshold', 'no threshold', 'frame threshold'],
         'source_types': ['pdf_spec', 'docx_spec', 'excel_boq'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'concealed_door_closure_hinge',
@@ -894,6 +1086,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['concealed closure', 'concealed hinge', 'concealed door closer', 'hidden hinge', 'concealed hardware'],
         'source_types': ['pdf_spec', 'docx_spec', 'excel_boq'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'glass_edge_to_support',
@@ -903,6 +1097,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['glass edge to support', 'glass edge distance', 'setting block distance', 'glass bite', 'glass support edge'],
         'source_types': ['pdf_spec', 'docx_spec', 'excel_boq'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'durability_requirements',
@@ -912,6 +1108,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['durability requirements', 'service life', 'component durability', 'UV resistance', 'weathering test'],
         'source_types': ['pdf_spec', 'docx_spec', 'excel_boq'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'lifting_provision',
@@ -921,6 +1119,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['lifting provision', 'lifting lug', 'vacuum lifting', 'crane hook', 'panel lifting'],
         'source_types': ['pdf_spec', 'docx_spec', 'excel_boq'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'silicon_gasket',
@@ -930,6 +1130,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['silicone gasket', 'silicon gasket', 'structural silicone', 'weatherseal silicone', 'silicone specification'],
         'source_types': ['pdf_spec', 'docx_spec', 'excel_boq'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'coating_specification',
@@ -939,6 +1141,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['AAMA 2603', 'AAMA 2604', 'AAMA 2605', 'powder coating', 'PVDF coating', 'coating grade', 'DFT', 'coating specification'],
         'source_types': ['pdf_spec', 'docx_spec', 'excel_boq'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'warranty_terms',
@@ -948,6 +1152,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['warranty terms', 'product warranty', 'system warranty', 'coating warranty', 'glass warranty', 'warranty period', 'guarantee terms'],
         'source_types': ['pdf_spec', 'docx_spec', 'excel_boq'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'metal_separator',
@@ -957,6 +1163,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['metal separator', 'thermal break', 'isolation strip', 'separator plate', 'bi-metallic isolation'],
         'source_types': ['pdf_spec', 'docx_spec', 'excel_boq'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'perimeter_rectangular_tube',
@@ -966,6 +1174,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['perimeter tube', 'rectangular tube', 'RHS tube', 'hollow section perimeter', 'box section perimeter'],
         'source_types': ['pdf_spec', 'docx_spec', 'excel_boq'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'fasteners',
@@ -975,6 +1185,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['fasteners', 'screws', 'self-drilling screw', 'rivet', 'bolt specification', 'fastener grade'],
         'source_types': ['pdf_spec', 'docx_spec', 'excel_boq'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'screw_hole_caps',
@@ -984,6 +1196,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['screw hole caps', 'screw cap', 'screw plug', 'hole cover', 'cap plug'],
         'source_types': ['pdf_spec', 'docx_spec', 'excel_boq'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'fin_end_caps',
@@ -993,6 +1207,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['fin end cap', 'end cap', 'fin closure', 'profile end cap'],
         'source_types': ['pdf_spec', 'docx_spec', 'excel_boq'],
+    
+        'project_type': 'commercial',
     },
     {
         'name': 'handle_for_sliders',
@@ -1002,6 +1218,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['slider handle', 'sliding handle', 'retaining catch', 'lever handle slider', 'handle for slider'],
         'source_types': ['pdf_spec', 'docx_spec', 'excel_boq'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'lock_key_required',
@@ -1011,6 +1229,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['lock and key', 'key lock', 'locking mechanism', 'window lock', 'door lock', 'key operated'],
         'source_types': ['pdf_spec', 'docx_spec', 'excel_boq'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'standard_custom_colour',
@@ -1020,6 +1240,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['standard colour', 'custom colour', 'RAL colour', 'special colour', 'colour selection', 'bespoke colour'],
         'source_types': ['pdf_spec', 'docx_spec', 'excel_boq'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'track_protection',
@@ -1029,6 +1251,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['track protection', 'track cover', 'sliding track protection', 'track guard'],
         'source_types': ['pdf_spec', 'docx_spec', 'excel_boq'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'ventilator_type',
@@ -1038,6 +1262,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['ventilator type', 'exhaust fan', 'louvre ventilator', 'ventilation type', 'facade ventilation'],
         'source_types': ['pdf_spec', 'docx_spec', 'excel_boq'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'door_type',
@@ -1047,6 +1273,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['door type', 'pivot door', 'swing door', 'side hung door', 'door configuration'],
         'source_types': ['pdf_spec', 'docx_spec', 'excel_boq'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'georgian_bar',
@@ -1056,6 +1284,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['Georgian bar', 'glazing bar', 'simulated divided lite', 'SDL bar', 'grid bar', 'window grille', 'decorative bar'],
         'source_types': ['pdf_spec', 'docx_spec', 'excel_boq'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'integration_ventilators',
@@ -1065,6 +1295,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['Renson', 'ventilator integration', 'specialist ventilator', 'facade ventilator brand'],
         'source_types': ['pdf_spec', 'docx_spec', 'excel_boq'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'interlock_end_caps',
@@ -1074,6 +1306,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['interlock end cap', 'slider interlock cap', 'panel interlock cap'],
         'source_types': ['pdf_spec', 'docx_spec', 'excel_boq'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'door_stopper',
@@ -1083,6 +1317,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['door stopper', 'door stop', 'floor door stop', 'wall door stop', 'magnetic door stop'],
         'source_types': ['pdf_spec', 'docx_spec', 'excel_boq'],
+    
+        'project_type': 'residential',
     },
     {
         'name': 'automation',
@@ -1092,6 +1328,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['automation', 'motorised', 'automatic window', 'automated door', 'electric actuator', 'motor drive'],
         'source_types': ['pdf_spec', 'docx_spec', 'excel_boq'],
+    
+        'project_type': 'residential',
     },
 
     # ══════════════════════════════════════════════════════════════
@@ -1106,6 +1344,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['DLP', 'defect liability period', 'defects liability', 'defect notification period', 'liability period', 'maintenance period'],
         'source_types': ['pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'bank_guarantee',
@@ -1115,6 +1355,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['bank guarantee', 'BG', 'performance bond', 'performance guarantee', 'advance payment guarantee'],
         'source_types': ['pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'retention',
@@ -1124,6 +1366,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['retention', 'retention money', 'retention percentage', 'retention amount', 'held retention'],
         'source_types': ['pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'quotation_validity',
@@ -1133,6 +1377,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['quotation validity', 'quote validity', 'tender validity', 'price validity', 'offer validity'],
         'source_types': ['pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'nalco_rate',
@@ -1142,6 +1388,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['NALCO rate', 'NALCO clause', 'aluminium escalation', 'metal price clause', 'NALCO price'],
         'source_types': ['pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'rate_validity',
@@ -1151,6 +1399,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['rate validity', 'rate fixed period', 'rate escalation', 'unit rate validity'],
         'source_types': ['pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'supplies_validity',
@@ -1160,6 +1410,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['supplies validity', 'supply commitment', 'delivery validity', 'supply schedule validity'],
         'source_types': ['pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'scope_of_supply',
@@ -1169,6 +1421,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['scope of supply', 'CIF', 'Ex Works', 'EXW', 'DDP', 'supply terms', 'incoterms'],
         'source_types': ['pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'wastages',
@@ -1178,6 +1432,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['wastages', 'wastage allowance', 'material wastage', 'wastage percentage', 'scrap allowance'],
         'source_types': ['pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'project_completion_timelines',
@@ -1187,6 +1443,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['completion timeline', 'project schedule', 'handover date', 'completion date', 'facade programme', 'construction schedule'],
         'source_types': ['pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'project_management_requirements',
@@ -1196,6 +1454,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['project management', 'site manager', 'QC plan', 'quality control', 'progress report', 'project coordinator'],
         'source_types': ['pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'shop_drawings',
@@ -1205,6 +1465,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['shop drawings', 'fabrication drawings', 'shop drawing approval', 'GA drawings', 'detailed drawings'],
         'source_types': ['pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'tolerances',
@@ -1214,6 +1476,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['fabrication tolerance', 'installation tolerance', 'dimensional tolerance', 'permissible deviation', 'workmanship tolerance', 'setting out tolerance'],
         'source_types': ['pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'pmu_cost',
@@ -1223,6 +1487,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['PMU cost', 'performance mock-up', 'full scale mock-up', 'facade mock-up', 'prototype testing', 'pre-construction mock-up', 'mock-up cost'],
         'source_types': ['pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'mode_of_measurement',
@@ -1232,6 +1498,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['mode of measurement', 'measurement method', 'BOQ size measurement', 'actual size measurement', 'quantity measurement'],
         'source_types': ['pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'payment_terms',
@@ -1241,6 +1509,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['payment terms', 'payment schedule', 'advance payment', 'milestone payment', 'progress payment', 'payment conditions'],
         'source_types': ['pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'mtc',
@@ -1250,6 +1520,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['MTC', 'material test certificate', 'mill test certificate', 'material test report', 'inspection certificate', 'quality certificate', 'test certificate'],
         'source_types': ['pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'protection_tape',
@@ -1259,6 +1531,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['protection tape', 'protective tape', 'protective film', 'surface protection', 'aluminium protection tape'],
         'source_types': ['pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'no_of_lots',
@@ -1268,6 +1542,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['number of lots', 'construction lots', 'installation phases', 'facade lots', 'lot requirement'],
         'source_types': ['pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'stationed_service_engineer',
@@ -1277,6 +1553,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['stationed service engineer', 'resident engineer', 'dedicated engineer', 'after-sales engineer', 'site service engineer', 'service engineer on site'],
         'source_types': ['pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'stationed_project_manager',
@@ -1286,6 +1564,8 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['stationed project manager', 'resident project manager', 'site manager', 'dedicated project manager', 'on-site project manager', 'project coordinator site'],
         'source_types': ['pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
     {
         'name': 'sample_board',
@@ -1295,5 +1575,7 @@ FACADE_PARAMETERS = [
         'value_type': 'text',
         'search_keywords': ['sample board', 'material sample board', 'approval sample', 'finish sample', 'colour sample', 'product sample', 'mock-up sample'],
         'source_types': ['pdf_spec', 'docx_spec'],
+    
+        'project_type': 'both',
     },
 ]
