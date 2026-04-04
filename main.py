@@ -1,6 +1,12 @@
 # main.py
+import asyncio
+import contextvars
+import logging as _logging_mod
 import os
+import re as _re
+import time as _time_mod
 import traceback
+import aiofiles
 from dotenv import load_dotenv
 
 from config.parameters import FACADE_PARAMETERS
@@ -20,7 +26,7 @@ from sqlalchemy.orm import sessionmaker, Session, joinedload
 from pinecone import Pinecone
 
 from auth.utils import create_access_token, verify_password, hash_password, decode_token, security
-from extraction.parameter_extractor import ParameterExtractor
+from extraction.parameter_extractor import ParameterExtractor, _get_llm_semaphore
 from models.base import Base
 from models.document import Document
 from models.document_chunk import DocumentChunk
@@ -50,11 +56,97 @@ app.add_middleware(
 def health():
     return {"status": "ok"}
 
+# ── Per-project timing store ──────────────────────────────────────────────────
+# Keyed by project_id string → list of timing dicts.
+# Populated by _TimingHandler below; read by the /timings endpoint.
+_project_timings: dict[str, list] = {}
+
+# ContextVar that _TimingHandler reads to know which project is active.
+# Set at the top of _run_pipeline and _run_extraction.
+_timing_project_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "_timing_project_id", default=None
+)
+
+_TIMING_RE = _re.compile(
+    r"\[TIMING\]\[(?P<tag>[^\]]+)\](?:\[(?P<sub>[^\]]+)\])?\s+(?P<rest>.+?):\s+(?P<dur>\d+\.\d+)s"
+)
+
+# Human-readable labels for each timing tag
+_TAG_LABELS = {
+    "PARSE":         "Document parsed",
+    "SECTION_GROUP": "Sections grouped",
+    "BUILD_CHUNKS":  "Chunks built",
+    "EMBED":         "Embeddings generated",
+    "STORE":         "Chunks stored to DB + Pinecone",
+    "BATCH":         "Batch complete",
+    "DOC_TOTAL":     "Document indexed (end-to-end)",
+    "BOQ_PARSE":     "BOQ parsed",
+    "BOQ_TEXT_BUILD":"BOQ text prepared",
+    "BOQ_PINECONE":  "BOQ uploaded to Pinecone",
+    "BOQ_TOTAL":     "BOQ document indexed (end-to-end)",
+    "EXTRACT_ALL":   "Full extraction round",
+    "EXTRACT":       "Parameter extracted",
+    "PIPELINE":      "Pipeline step",
+}
+
+# Tags to surface as "summary" (high-level) vs detailed
+_SUMMARY_TAGS = {"DOC_TOTAL", "BOQ_TOTAL", "EXTRACT_ALL", "PIPELINE"}
+
+
+class _TimingHandler(_logging_mod.Handler):
+    """Capture [TIMING] log records and store them per active project."""
+
+    def emit(self, record: _logging_mod.LogRecord):
+        project_id = _timing_project_id.get()
+        if not project_id:
+            return
+        msg = record.getMessage()
+        if "[TIMING]" not in msg:
+            return
+        m = _TIMING_RE.search(msg)
+        if not m:
+            return
+        tag  = m.group("tag")
+        sub  = m.group("sub")    # e.g. parameter name for EXTRACT
+        rest = m.group("rest").strip()
+        dur  = float(m.group("dur"))
+        label = _TAG_LABELS.get(tag, tag)
+        if sub:
+            label = f"{label}: {sub}"
+        entry = {
+            "tag":      tag,
+            "sub":      sub,
+            "label":    label,
+            "detail":   rest,
+            "duration": round(dur, 2),
+            "ts":       _time_mod.time(),
+            "summary":  tag in _SUMMARY_TAGS,
+        }
+        _project_timings.setdefault(project_id, []).append(entry)
+
+
+_timing_handler = _TimingHandler()
+_timing_handler.setLevel(_logging_mod.DEBUG)
+
+# Attach to every logger that emits [TIMING] records
+for _logger_name in (
+    "processing.document_processor",
+    "extraction.parameter_extractor",
+    "pipeline",
+):
+    _logging_mod.getLogger(_logger_name).addHandler(_timing_handler)
+
 # ── Database ──────────────────────────────────────────────────────────────────
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://poc_user:poc_password@localhost:5432/tender_poc")
 # Railway provides postgres:// but SQLAlchemy requires postgresql://
 DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-engine = create_engine(DATABASE_URL)
+engine = create_engine(
+    DATABASE_URL,
+    pool_size=10,
+    max_overflow=20,
+    pool_pre_ping=True,
+    pool_recycle=1800,
+)
 SessionLocal = sessionmaker(bind=engine)
 
 def get_db():
@@ -111,6 +203,36 @@ def on_startup():
             "ALTER TABLE document_chunks ALTER COLUMN pinecone_id DROP NOT NULL"
         ))
         conn.commit()
+        # ── New columns for multi-file / large-file support ───────────────────
+        conn.execute(text(
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS processing_status VARCHAR(20) DEFAULT 'pending'"
+        ))
+        conn.execute(text(
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS processing_error TEXT"
+        ))
+        conn.execute(text(
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS page_count INTEGER"
+        ))
+        conn.execute(text(
+            "ALTER TABLE extracted_parameters ADD COLUMN IF NOT EXISTS all_sources TEXT"
+        ))
+        conn.execute(text(
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS pipeline_step TEXT"
+        ))
+        # ── Sources JSON in query_log for chat history persistence ────────────
+        conn.execute(text(
+            "ALTER TABLE query_log ADD COLUMN IF NOT EXISTS sources_json JSONB"
+        ))
+        # ── Project type (commercial / residential) and updated_at ────────────
+        conn.execute(text(
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS "
+            "project_type VARCHAR(20) NOT NULL DEFAULT 'commercial'"
+        ))
+        conn.execute(text(
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS "
+            "updated_at TIMESTAMP DEFAULT now()"
+        ))
+        conn.commit()
 
 # ── Pinecone ──────────────────────────────────────────────────────────────────
 def initialize_pinecone():
@@ -143,17 +265,41 @@ pinecone_index = initialize_pinecone()
 embedding_client = GoogleEmbedding()
 gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
+# ── Global pipeline concurrency cap ──────────────────────────────────────────
+# Limits simultaneous _run_pipeline executions to prevent DB pool exhaustion
+# and Gemini rate-limit saturation when many projects are uploaded at once.
+# Projects beyond the limit queue in the asyncio event loop rather than crashing.
+# 3 concurrent pipelines × ~7 DB sessions each = 21 connections (within pool of 30).
+_PIPELINE_SEMAPHORE = asyncio.Semaphore(3)
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
+_DRAWING_FILENAME_KEYWORDS = [
+    'drawing', 'drawings', 'tender drg', 'drg', 'elevation', 'elevations',
+    'facade detail', 'curtain wall detail', 'cw detail', 'layout',
+    'floor plan', 'site plan', 'detail sheet', 'detail drg',
+]
+
 def classify_file_type(filename: str) -> str:
-    ext = Path(filename).suffix.lower()
+    ext  = Path(filename).suffix.lower()
+    stem = Path(filename).stem.lower()
     if ext == ".pdf":
+        # Detect drawing PDFs by filename keywords before falling back to pdf_spec.
+        # Content-based auto-detection (char-count sampling) still runs at parse
+        # time inside _choose_pdf_parser and will catch drawing PDFs not matched
+        # here. Together the two heuristics cover virtually all real tender sets.
+        if any(kw in stem for kw in _DRAWING_FILENAME_KEYWORDS):
+            return "pdf_drawing"
         return "pdf_spec"
     elif ext in [".docx", ".doc"]:
         return "docx_spec"
-    elif ext in [".xlsx", ".xls"]:
+    elif ext in [".xlsx", ".xls", ".csv", ".ods"]:
         return "excel_boq"
+    elif ext == ".dxf":
+        return "dxf_drawing"
+    elif ext == ".dwg":
+        return "dwg_drawing"
     else:
-        raise ValueError(f"Unsupported file type: {filename}")
+        raise ValueError(f"Unsupported file type: {filename}. Supported: PDF, DOCX, XLSX, XLS, CSV, ODS, DXF, DWG")
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
@@ -164,8 +310,11 @@ def list_projects(db: Session = Depends(get_db)):
         {
             "project_id": str(p.project_id),
             "project_name": p.project_name,
+            "project_type": getattr(p, "project_type", "commercial") or "commercial",
             "processing_status": p.processing_status,
             "created_at": p.created_at.isoformat() if p.created_at else None,
+            "updated_at": (p.updated_at.isoformat() if getattr(p, "updated_at", None) else
+                           p.created_at.isoformat() if p.created_at else None),
         }
         for p in projects
     ]
@@ -175,12 +324,19 @@ def list_projects(db: Session = Depends(get_db)):
 async def create_project(
     project_name: str = Form(...),
     project_description: str = Form(None),
+    project_type: str = Form("commercial"),
     files: List[UploadFile] = File(...),
     db: Session = Depends(get_db),
 ):
+    # Validate project_type
+    p_type = project_type.lower().strip() if project_type else "commercial"
+    if p_type not in ("commercial", "residential"):
+        p_type = "commercial"
+
     project = Project(
         project_name=project_name,
         project_description=project_description,
+        project_type=p_type,
         processing_status="uploaded",
     )
     db.add(project)
@@ -194,8 +350,9 @@ async def create_project(
     for file in files:
         file_type = classify_file_type(file.filename)
         file_path = upload_dir / file.filename
-        with file_path.open("wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        async with aiofiles.open(str(file_path), "wb") as buffer:
+            while chunk := await file.read(1024 * 1024):  # 1 MB chunks
+                await buffer.write(chunk)
 
         document = Document(
             project_id=project.project_id,
@@ -212,6 +369,7 @@ async def create_project(
     return {
         "project_id": str(project.project_id),
         "project_name": project.project_name,
+        "project_type": project.project_type,
         "documents_uploaded": len(saved_documents),
         "status": "uploaded",
     }
@@ -220,8 +378,63 @@ async def create_project(
 import logging as _logging
 _pipeline_log = _logging.getLogger("pipeline")
 
+
+async def _wait_for_pinecone_doc(project_id: str, document_id: str, timeout: int = 90) -> None:
+    """Poll Pinecone until a specific document's vectors are queryable.
+
+    Uses a per-document filter so we only proceed once THIS doc's chunks are
+    visible — not just any old vector from a previous run.
+    """
+    dummy_vec = [0.0] * 1536
+    elapsed = 0
+    poll_interval = 3
+    while elapsed < timeout:
+        await asyncio.sleep(poll_interval)
+        elapsed += poll_interval
+        try:
+            probe = pinecone_index.query(
+                vector=dummy_vec,
+                top_k=1,
+                filter={"project_id": project_id, "document_id": document_id},
+                include_metadata=False,
+            )
+            if probe.get("matches"):
+                _pipeline_log.info(
+                    f"[PIPELINE] Pinecone ready for doc {document_id} after {elapsed}s"
+                )
+                return
+        except Exception as exc:
+            _pipeline_log.warning(f"[PIPELINE] Pinecone probe error: {exc}")
+    _pipeline_log.warning(
+        f"[PIPELINE] Pinecone timed out for doc {document_id} after {timeout}s — proceeding anyway"
+    )
+
+
 async def _run_pipeline(project_id: uuid.UUID):
-    """Background task: parse → embed → store → extract parameters."""
+    """Queuing wrapper — acquires global pipeline slot, then delegates to inner."""
+    import time as _time
+    _timing_project_id.set(str(project_id))
+    _pipeline_log.info(f"[PIPELINE] Queued project {project_id} — waiting for pipeline slot…")
+    async with _PIPELINE_SEMAPHORE:
+        await _run_pipeline_inner(project_id)
+
+
+async def _run_pipeline_inner(project_id: uuid.UUID):
+    """Background task: per-document parse → embed → extract parameters.
+
+    Architecture
+    ────────────
+    Phase 1: Parse + embed ALL spec documents sequentially (shared DB session).
+             After each parse, fire a concurrent asyncio.Task to watch for that
+             document's vectors in Pinecone. All watch-tasks run in parallel so
+             total Phase-1 wall time = parse_time_sum + max(single_pinecone_wait).
+    Phase 2: Extraction runs ONCE after all docs are indexed — one set of
+             18 batch LLM calls regardless of how many documents were uploaded.
+    """
+    import time as _time
+    _timing_project_id.set(str(project_id))
+    _project_timings[str(project_id)] = []   # reset on each new run
+    t_pipeline_start = _time.perf_counter()
     _pipeline_log.info(f"[PIPELINE] Starting for project {project_id}")
     db = SessionLocal()
     try:
@@ -230,76 +443,218 @@ async def _run_pipeline(project_id: uuid.UUID):
             _pipeline_log.error(f"[PIPELINE] Project {project_id} not found")
             return
 
-        # ── Step 1: Document processing ──────────────────────────────────────
-        _pipeline_log.info(f"[PIPELINE] Step 1: Document processing")
+        all_docs = db.query(Document).filter(
+            Document.project_id == project_id,
+            Document.processed == False,
+        ).all()
+
+        spec_docs = [d for d in all_docs if d.file_type in ['pdf_spec', 'docx_spec', 'dxf_drawing', 'dwg_drawing', 'pdf_drawing']]
+        boq_docs  = [d for d in all_docs if d.file_type == 'excel_boq']
+        # Process non-drawing specs first (fast), then heavy drawing PDFs last
+        spec_docs.sort(key=lambda d: (1 if d.file_type == 'pdf_drawing' else 0, d.original_filename))
+        total_spec = len(spec_docs)
+        _pipeline_log.info(
+            f"[PIPELINE] {len(spec_docs)} spec docs, {len(boq_docs)} BOQ docs"
+        )
+
         processor = DocumentProcessor(
             project_id=project_id,
             db_session=db,
             pinecone_index=pinecone_index,
             embedding_client=embedding_client,
         )
-        processor.process_all_documents()
 
-        # Verify chunks were actually stored
-        from models.document_chunk import DocumentChunk
-        chunk_count = db.query(DocumentChunk).filter(
-            DocumentChunk.project_id == project_id
-        ).count()
-        _pipeline_log.info(f"[PIPELINE] Step 1 done — {chunk_count} chunks in DB")
-
-        db.expire_all()
-
-        # ── Wait for Pinecone to index the newly upserted vectors ─────────────
-        # Pinecone has eventual-consistency: vectors are not immediately queryable
-        # after upsert. Poll with a dummy query until at least one vector for this
-        # project is returned (or until a hard timeout of 30 s).
-        _pipeline_log.info(f"[PIPELINE] Waiting for Pinecone to index vectors for project {project_id}…")
-        import asyncio as _asyncio
-        _dummy_vec = [0.0] * 1536
-        deadline = 30  # max seconds to wait
-        poll_interval = 2
-        elapsed = 0
-        while elapsed < deadline:
-            await _asyncio.sleep(poll_interval)
-            elapsed += poll_interval
+        # ── Process BOQ documents (no LLM extraction needed) ─────────────────
+        boq_pinecone_tasks = []
+        for doc in boq_docs:
+            project.pipeline_step = f"Processing BOQ: {doc.original_filename}"
+            doc.processing_status = "processing"
+            db.commit()
+            t_boq = _time.perf_counter()
             try:
-                probe = pinecone_index.query(
-                    vector=_dummy_vec,
-                    top_k=1,
-                    filter={"project_id": str(project_id)},
-                    include_metadata=False,
+                processor._process_boq_document(doc)
+                doc.processing_status = "completed"
+                _pipeline_log.info(
+                    f"[TIMING][PIPELINE] BOQ {doc.original_filename}: "
+                    f"{_time.perf_counter() - t_boq:.2f}s"
                 )
-                hit_count = len(probe.get("matches", []))
-            except Exception:
-                hit_count = 0
-            _pipeline_log.info(
-                f"[PIPELINE] Pinecone probe after {elapsed}s: {hit_count} hit(s) for project"
+                # Fire Pinecone wait so BOQ vectors are ready for extraction
+                boq_pinecone_tasks.append(
+                    asyncio.create_task(
+                        _wait_for_pinecone_doc(str(project_id), str(doc.document_id), timeout=120)
+                    )
+                )
+            except Exception as e:
+                _pipeline_log.error(f"[PIPELINE] BOQ failed {doc.original_filename}: {e}")
+                doc.processing_status = "failed"
+                doc.processing_error = str(e)[:1000]
+            db.commit()
+
+        # ── Phase 1: Parse all spec docs in PARALLEL ─────────────────────────
+        # Each document gets its own DB session — no shared-state conflicts.
+        # Up to DOC_CONCURRENCY docs processed simultaneously; text specs
+        # (fast) finish quickly while heavy drawing PDFs run in parallel.
+        DOC_CONCURRENCY = 3
+        _doc_semaphore = asyncio.Semaphore(DOC_CONCURRENCY)
+        _progress_lock = asyncio.Lock()      # serialise pipeline_step updates
+        _completed_count = [0]               # mutable counter for progress
+
+        indexed_spec_count = 0
+        indexed_docs    = []
+        pinecone_wait_tasks = []
+
+        async def _process_one_spec(doc, idx):
+            """Process a single spec document, return (doc, success, wait_task|None)."""
+            async with _doc_semaphore:
+                doc_id   = doc.document_id
+                doc_name = doc.original_filename
+
+                async with _progress_lock:
+                    project.pipeline_step = (
+                        f"Processing documents ({idx}/{total_spec})…"
+                    )
+                    db.commit()
+
+                t_doc = _time.perf_counter()
+                doc_session = SessionLocal()
+                try:
+                    doc_local = doc_session.query(Document).filter(
+                        Document.document_id == doc_id
+                    ).first()
+                    doc_local.processing_status = "processing"
+                    doc_session.commit()
+
+                    doc_processor = DocumentProcessor(
+                        project_id=project_id,
+                        db_session=doc_session,
+                        pinecone_index=pinecone_index,
+                        embedding_client=embedding_client,
+                    )
+
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(
+                        None, doc_processor._process_specification_document, doc_local
+                    )
+
+                    doc_local.processing_status = "indexed"
+                    doc_session.commit()
+
+                    _completed_count[0] += 1
+                    _pipeline_log.info(
+                        f"[TIMING][PIPELINE] Parse+embed {doc_name} "
+                        f"({_completed_count[0]}/{total_spec}): "
+                        f"{_time.perf_counter() - t_doc:.2f}s"
+                    )
+
+                    wait_task = asyncio.create_task(
+                        _wait_for_pinecone_doc(str(project_id), str(doc_id), timeout=180)
+                    )
+                    return (doc, True, wait_task)
+
+                except Exception as e:
+                    _pipeline_log.error(f"[PIPELINE] Parse failed {doc_name}: {e}")
+                    try:
+                        doc_session.rollback()
+                        doc_local = doc_session.query(Document).filter(
+                            Document.document_id == doc_id
+                        ).first()
+                        if doc_local:
+                            doc_local.processing_status = "failed"
+                            doc_local.processing_error = str(e)[:1000]
+                            doc_session.commit()
+                    except Exception:
+                        pass
+                    return (doc, False, None)
+                finally:
+                    doc_session.close()
+
+        # Launch all spec docs concurrently (semaphore limits to DOC_CONCURRENCY)
+        spec_tasks = [
+            _process_one_spec(doc, i)
+            for i, doc in enumerate(spec_docs, 1)
+        ]
+        spec_results = await asyncio.gather(*spec_tasks, return_exceptions=True)
+
+        for result in spec_results:
+            if isinstance(result, Exception):
+                _pipeline_log.error(f"[PIPELINE] Unexpected task error: {result}")
+                continue
+            doc, success, wait_task = result
+            if success:
+                indexed_spec_count += 1
+                indexed_docs.append(doc)
+                if wait_task:
+                    pinecone_wait_tasks.append(wait_task)
+
+        # ── Synchronization barrier: all Pinecone tasks must complete ─────────
+        all_pinecone_tasks = pinecone_wait_tasks + boq_pinecone_tasks
+        if all_pinecone_tasks:
+            project.pipeline_step = (
+                f"Indexing {len(all_pinecone_tasks)} document(s) into vector database…"
             )
-            if hit_count > 0:
-                _pipeline_log.info(f"[PIPELINE] Pinecone ready — proceeding to extraction")
-                break
+            db.commit()
+            t_wait_all = _time.perf_counter()
+            await asyncio.gather(*all_pinecone_tasks)
+            _pipeline_log.info(
+                f"[TIMING][PIPELINE] All Pinecone waits completed: "
+                f"{_time.perf_counter() - t_wait_all:.2f}s"
+            )
+
+        # ── Phase 2: Extract ALL parameters ONCE after all docs are indexed ───
+        # Running extraction once (not per-doc) reduces LLM calls by ~N× where
+        # N is the number of spec documents, which is the main source of slowness.
+        # Run extraction if ANY documents were processed (spec OR BOQ) — BOQ
+        # chunks are in Pinecone and can answer BOQ-related parameters.
+        total_indexed = indexed_spec_count + len(boq_docs)
+        if total_indexed > 0:
+            # Filter parameters by project type (commercial/residential)
+            p_type = project.project_type or "commercial"
+            filtered_params = [
+                p for p in FACADE_PARAMETERS
+                if p.get("project_type", "both") in ("both", p_type)
+            ]
+            project.pipeline_step = (
+                f"Extracting {len(filtered_params)} parameters across {total_indexed} document(s)…"
+            )
+            db.commit()
+            db.expire_all()
+
+            extractor = ParameterExtractor(
+                pinecone_index=pinecone_index,
+                embedding_client=embedding_client,
+                db_session=db,
+                session_factory=SessionLocal,
+            )
+            t_extract = _time.perf_counter()
+            extractions = await extractor.extract_all_parameters_async(
+                str(project_id),
+                facade_parameters=filtered_params,
+                max_concurrent=10,
+                num_docs=total_indexed,
+            )
+            found_count = len([e for e in extractions if e.get("found")])
+            _pipeline_log.info(
+                f"[TIMING][PIPELINE] Extraction (single pass, {total_indexed} docs): "
+                f"{_time.perf_counter() - t_extract:.2f}s — "
+                f"{found_count}/{len(extractions)} params found"
+            )
         else:
-            _pipeline_log.warning(f"[PIPELINE] Pinecone probe timed out after {deadline}s — proceeding anyway")
+            _pipeline_log.warning("[PIPELINE] No documents processed — skipping extraction")
 
-        # ── Step 2: Parameter extraction ─────────────────────────────────────
-        _pipeline_log.info(f"[PIPELINE] Step 2: Parameter extraction")
-        extractor = ParameterExtractor(
-            pinecone_index=pinecone_index,
-            embedding_client=embedding_client,
-            db_session=db,
-            session_factory=SessionLocal,
-        )
-        extractions = await extractor.extract_all_parameters_async(
-            str(project_id), facade_parameters=FACADE_PARAMETERS
-        )
+        # Mark all successfully indexed docs as completed
+        for doc in indexed_docs:
+            doc.processing_status = "completed"
+        db.commit()
 
-        found_count = len([e for e in extractions if e.get("found")])
-        _pipeline_log.info(f"[PIPELINE] Step 2 done — {found_count}/{len(extractions)} parameters found")
-
-        # ── Step 3: Mark complete ─────────────────────────────────────────────
+        # ── All documents done ────────────────────────────────────────────────
         project.processing_status = "completed"
+        project.pipeline_step = None
         project.processing_completed_at = datetime.now()
         db.commit()
+        _pipeline_log.info(
+            f"[TIMING][PIPELINE] TOTAL for project {project_id}: "
+            f"{_time.perf_counter() - t_pipeline_start:.2f}s"
+        )
         _pipeline_log.info(f"[PIPELINE] Completed for project {project_id}")
 
     except Exception as e:
@@ -309,6 +664,7 @@ async def _run_pipeline(project_id: uuid.UUID):
             project = db.query(Project).filter(Project.project_id == project_id).first()
             if project:
                 project.processing_status = "failed"
+                project.pipeline_step = None
                 project.error_message = str(e)
                 db.commit()
         except Exception:
@@ -360,6 +716,8 @@ async def re_extract_parameters(
         raise HTTPException(status_code=404, detail="Project not found")
 
     async def _run_extraction(pid: uuid.UUID):
+        _timing_project_id.set(str(pid))
+        _project_timings[str(pid)] = []   # reset on re-extract
         _pipeline_log.info(f"[RE-EXTRACT] Starting for project {pid}")
         _db = SessionLocal()
         try:
@@ -367,7 +725,22 @@ async def re_extract_parameters(
             _proj = _db.query(Project).filter(Project.project_id == pid).first()
             if _proj:
                 _proj.processing_status = "processing"
+                _proj.pipeline_step = "Re-extracting parameters from all documents…"
                 _db.commit()
+
+            # Count already-processed docs so top_k / max_sources scale correctly
+            doc_count = _db.query(Document).filter(
+                Document.project_id == pid,
+                Document.processed == True,
+            ).count()
+
+            # Filter parameters by project type
+            p_type = _proj.project_type if _proj else "commercial"
+            filtered_params = [
+                p for p in FACADE_PARAMETERS
+                if p.get("project_type", "both") in ("both", p_type)
+            ]
+            _pipeline_log.info(f"[RE-EXTRACT] {len(filtered_params)} params for {p_type} project")
 
             extractor = ParameterExtractor(
                 pinecone_index=pinecone_index,
@@ -376,7 +749,10 @@ async def re_extract_parameters(
                 session_factory=SessionLocal,
             )
             extractions = await extractor.extract_all_parameters_async(
-                str(pid), facade_parameters=FACADE_PARAMETERS
+                str(pid),
+                facade_parameters=filtered_params,
+                max_concurrent=10,
+                num_docs=max(1, doc_count),
             )
             found_count = len([e for e in extractions if e.get("found")])
             _pipeline_log.info(f"[RE-EXTRACT] Done — {found_count}/{len(extractions)} parameters found")
@@ -385,6 +761,7 @@ async def re_extract_parameters(
             _proj = _db.query(Project).filter(Project.project_id == pid).first()
             if _proj:
                 _proj.processing_status = "completed"
+                _proj.pipeline_step = None
                 _db.commit()
         except Exception as e:
             import traceback as _tb
@@ -394,6 +771,7 @@ async def re_extract_parameters(
                 _proj = _db.query(Project).filter(Project.project_id == pid).first()
                 if _proj:
                     _proj.processing_status = "failed"
+                    _proj.pipeline_step = None
                     _db.commit()
             except Exception:
                 pass
@@ -405,6 +783,208 @@ async def re_extract_parameters(
         "project_id": str(project_id),
         "status": "re-extracting",
         "message": "Extraction started. Check /projects/{project_id}/parameters after ~60s.",
+    }
+
+
+@app.post("/projects/{project_id}/parameters/{param_name}/re-extract", status_code=202)
+async def re_extract_single_parameter(
+    project_id: uuid.UUID,
+    param_name: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """Re-run extraction for a single parameter. Uses vectors already in Pinecone."""
+    project = db.query(Project).filter(Project.project_id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Find the parameter config by name
+    param_config = next((p for p in FACADE_PARAMETERS if p['name'] == param_name), None)
+    if not param_config:
+        raise HTTPException(status_code=404, detail=f"Unknown parameter: {param_name}")
+
+    async def _run_single_extraction(pid: uuid.UUID, p_config: dict):
+        _timing_project_id.set(str(pid))
+        _db = SessionLocal()
+        try:
+            spec_count = _db.query(Document).filter(
+                Document.project_id == pid,
+                Document.file_type.in_(['pdf_spec', 'docx_spec', 'pdf_drawing']),
+                Document.processed == True,
+            ).count()
+
+            extractor = ParameterExtractor(
+                pinecone_index=pinecone_index,
+                embedding_client=embedding_client,
+                db_session=_db,
+                session_factory=SessionLocal,
+            )
+            loop = asyncio.get_running_loop()
+            import time as _t
+            t0 = _t.perf_counter()
+            # Use focused single-param search
+            focused_query = f"{p_config['display_name']} {' '.join(p_config['search_keywords'][:6])}"
+            param_types = p_config.get('source_types') or None
+            top_k = min(60, max(10, 4 * max(1, spec_count)))
+            chunk_dicts = await extractor._search_pinecone_async(
+                loop, focused_query, str(pid), top_k=top_k, file_types=param_types
+            )
+            if chunk_dicts:
+                context = extractor._build_context(chunk_dicts, max_sources=min(20, len(chunk_dicts)))
+                async with _get_llm_semaphore():
+                    result_text = await asyncio.wait_for(
+                        loop.run_in_executor(None, extractor._call_llm, p_config, context),
+                        timeout=90.0,
+                    )
+                result = extractor._parse_llm_response(result_text, p_config, chunk_dicts)
+            else:
+                result = {'found': False, 'explanation': 'No relevant content found in indexed documents.'}
+
+            extractor._store_extraction(str(pid), p_config, result)
+            _pipeline_log.info(
+                f"[SINGLE-EXTRACT] '{p_config['name']}' → "
+                f"{'found ✓' if result.get('found') else 'not found'} "
+                f"({_t.perf_counter()-t0:.2f}s)"
+            )
+        except Exception as e:
+            _pipeline_log.error(f"[SINGLE-EXTRACT] Failed '{p_config['name']}': {e}")
+        finally:
+            _db.close()
+
+    background_tasks.add_task(_run_single_extraction, project_id, param_config)
+    return {
+        "project_id": str(project_id),
+        "parameter_name": param_name,
+        "status": "re-extracting",
+        "message": f"Re-extraction of '{param_config['display_name']}' started.",
+    }
+
+
+@app.post("/projects/{project_id}/documents/{document_id}/reprocess", status_code=202)
+async def reprocess_document(
+    project_id: uuid.UUID,
+    document_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """Re-process a single document: re-parse, re-embed, re-index, then re-extract parameters."""
+    project = db.query(Project).filter(Project.project_id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    doc = db.query(Document).filter(
+        Document.document_id == document_id,
+        Document.project_id == project_id,
+    ).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    async def _run_doc_reprocess(pid: uuid.UUID, did: uuid.UUID):
+        _timing_project_id.set(str(pid))
+        _pipeline_log.info(f"[REPROCESS-DOC] Starting for document {did}")
+        _db = SessionLocal()
+        try:
+            _proj = _db.query(Project).filter(Project.project_id == pid).first()
+            _doc = _db.query(Document).filter(Document.document_id == did).first()
+            if not _doc:
+                return
+
+            _doc.processing_status = "processing"
+            _doc.processing_error = None
+            if _proj:
+                _proj.processing_status = "processing"
+                _proj.pipeline_step = f"Re-processing: {_doc.original_filename}"
+            _db.commit()
+
+            # Delete old chunks for this document from DB and Pinecone
+            old_chunks = _db.query(DocumentChunk).filter(
+                DocumentChunk.document_id == did
+            ).all()
+            old_pinecone_ids = [c.pinecone_id for c in old_chunks if c.pinecone_id]
+            if old_pinecone_ids:
+                BATCH = 100
+                for i in range(0, len(old_pinecone_ids), BATCH):
+                    try:
+                        pinecone_index.delete(ids=old_pinecone_ids[i:i+BATCH])
+                    except Exception:
+                        pass
+            for c in old_chunks:
+                _db.delete(c)
+            _db.commit()
+
+            # Re-process based on file type
+            if _doc.file_type == 'excel_boq':
+                processor = DocumentProcessor(
+                    project_id=pid, db_session=_db,
+                    pinecone_index=pinecone_index, embedding_client=embedding_client,
+                )
+                processor._process_boq_document(_doc)
+            else:
+                doc_processor = DocumentProcessor(
+                    project_id=pid, db_session=_db,
+                    pinecone_index=pinecone_index, embedding_client=embedding_client,
+                )
+                doc_processor._process_specification_document(_doc)
+
+            _doc.processing_status = "completed"
+            _doc.processed = True
+            _db.commit()
+
+            # Wait for Pinecone indexing
+            await _wait_for_pinecone_doc(str(pid), str(did), timeout=120)
+
+            # Re-extract parameters
+            p_type = _proj.project_type if _proj else "commercial"
+            filtered_params = [
+                p for p in FACADE_PARAMETERS
+                if p.get("project_type", "both") in ("both", p_type)
+            ]
+            if _proj:
+                _proj.pipeline_step = f"Re-extracting {len(filtered_params)} parameters..."
+                _db.commit()
+
+            doc_count = _db.query(Document).filter(
+                Document.project_id == pid, Document.processed == True,
+            ).count()
+            extractor = ParameterExtractor(
+                pinecone_index=pinecone_index, embedding_client=embedding_client,
+                db_session=_db, session_factory=SessionLocal,
+            )
+            await extractor.extract_all_parameters_async(
+                str(pid), facade_parameters=filtered_params,
+                max_concurrent=10, num_docs=max(1, doc_count),
+            )
+
+            if _proj:
+                _proj.processing_status = "completed"
+                _proj.pipeline_step = None
+                _db.commit()
+            _pipeline_log.info(f"[REPROCESS-DOC] Completed for document {did}")
+
+        except Exception as e:
+            import traceback as _tb
+            _tb.print_exc()
+            _pipeline_log.error(f"[REPROCESS-DOC] FAILED for document {did}: {e}")
+            try:
+                _doc = _db.query(Document).filter(Document.document_id == did).first()
+                if _doc:
+                    _doc.processing_status = "failed"
+                    _doc.processing_error = str(e)[:1000]
+                _proj = _db.query(Project).filter(Project.project_id == pid).first()
+                if _proj:
+                    _proj.processing_status = "completed"
+                    _proj.pipeline_step = None
+                _db.commit()
+            except Exception:
+                pass
+        finally:
+            _db.close()
+
+    background_tasks.add_task(_run_doc_reprocess, project_id, document_id)
+    return {
+        "project_id": str(project_id),
+        "document_id": str(document_id),
+        "status": "reprocessing",
+        "message": f"Re-processing '{doc.original_filename}' started.",
     }
 
 
@@ -421,7 +1001,7 @@ async def get_extracted_parameters(project_id: uuid.UUID, db: Session = Depends(
     import json as _json
     results = []
     for param in parameters:
-        # Parse stored pages JSON; fall back to primary page if missing
+        # Parse legacy pages list
         try:
             pages = _json.loads(param.source_pages) if param.source_pages else []
         except (ValueError, TypeError):
@@ -429,11 +1009,39 @@ async def get_extracted_parameters(project_id: uuid.UUID, db: Session = Depends(
         if not pages and param.source_page_number is not None:
             pages = [param.source_page_number]
 
+        # Parse rich multi-document sources list
+        try:
+            all_sources = _json.loads(param.all_sources) if param.all_sources else []
+        except (ValueError, TypeError):
+            all_sources = []
+
+        # Back-fill all_sources from legacy fields if not present
+        if not all_sources and (param.source_document or pages):
+            doc_name = param.source_document.original_filename if param.source_document else None
+            if doc_name or pages:
+                all_sources = [{
+                    "document_id": str(param.source_document_id) if param.source_document_id else None,
+                    "document":    doc_name,
+                    "pages":       pages,
+                    "section":     param.source_section,
+                }]
+
+        # Fetch source chunk text for "show evidence" in UI
+        chunk_text = None
+        if param.source_chunk_id and param.source_chunk:
+            chunk_text = param.source_chunk.chunk_text
+
+        # Detect multi-document sourcing (potential conflict worth showing)
+        unique_docs = {s.get("document_id") for s in all_sources if s.get("document_id")}
+        multi_source = len(unique_docs) > 1
+
         results.append({
             "parameter_name": param.parameter_display_name,
+            "parameter_key": param.parameter_name,
             "value": param.value_text,
             "unit": param.unit,
-            "confidence": float(param.confidence_score),
+            "confidence": float(param.confidence_score) if param.confidence_score is not None else None,
+            # Primary source (backwards compatible)
             "source": {
                 "document": param.source_document.original_filename if param.source_document else None,
                 "page": param.source_page_number,
@@ -441,14 +1049,66 @@ async def get_extracted_parameters(project_id: uuid.UUID, db: Session = Depends(
                 "section": param.source_section,
                 "subsection": param.source_subsection,
             },
+            # Full multi-document source list (new)
+            "sources": all_sources,
             "notes": param.notes,
+            # Source evidence text — shown in detail modal
+            "source_text": chunk_text,
+            # True when value was drawn from multiple documents (show multi-source badge)
+            "multi_source": multi_source,
         })
+
+    from models.document import Document as _Document
+    docs = db.query(_Document).filter(_Document.project_id == project_id).all()
+    documents_info = [
+        {
+            "document_id": str(d.document_id),
+            "filename": d.original_filename,
+            "file_type": d.file_type,
+            "processing_status": getattr(d, 'processing_status', 'completed'),
+            "processing_error": getattr(d, 'processing_error', None),
+            "page_count": getattr(d, 'page_count', None),
+            "num_chunks": d.num_chunks,
+        }
+        for d in docs
+    ]
 
     return {
         "project_id": str(project_id),
+        "project_type": getattr(project, "project_type", "commercial") or "commercial",
         "processing_status": project.processing_status,
+        "pipeline_step": getattr(project, 'pipeline_step', None),
         "parameters": results,
         "total_extracted": len(results),
+        "documents": documents_info,
+    }
+
+
+@app.get("/projects/{project_id}/timings")
+async def get_project_timings(project_id: uuid.UUID, db: Session = Depends(get_db)):
+    """Return captured [TIMING] log entries for a project, split into summary and details."""
+    project = db.query(Project).filter(Project.project_id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    entries = _project_timings.get(str(project_id), [])
+    summary = [e for e in entries if e["summary"]]
+    details = [e for e in entries if not e["summary"]]
+
+    # Derive total pipeline duration from the PIPELINE TOTAL entry if present
+    total = next(
+        (e["duration"] for e in reversed(summary)
+         if e["tag"] == "PIPELINE" and "TOTAL" in e["detail"]),
+        None,
+    )
+
+    return {
+        "project_id":      str(project_id),
+        "processing_status": project.processing_status,
+        "total_seconds":   total,
+        "summary":         summary,
+        "details":         details,
+        "all":             entries,
     }
 
 
@@ -492,32 +1152,74 @@ async def adhoc_query(project_id: uuid.UUID, query: str = Form(...), db: Session
     context = "\n\n".join([
         f"[Source {i+1}: {chunk.document.original_filename}, Page {chunk.page_number or 'N/A'}, "
         f"Section: {chunk.section_title or 'N/A'}]\n{chunk.chunk_text}"
-        for i, chunk in enumerate(context_chunks[:3])
+        for i, chunk in enumerate(context_chunks[:5])
     ])
 
-    system_prompt = """You are an expert tender analyst. Answer questions based ONLY on the provided context.
-- Provide clear, direct answers with specific values and units.
-- Always cite the page number (e.g. "Page 12") and document name where the information was found.
-- If the answer isn't present, say "Information not found in documents"."""
+    # Load recent chat history for conversational context
+    recent_logs = (
+        db.query(QueryLog)
+        .filter(QueryLog.project_id == project_id)
+        .order_by(QueryLog.created_at.desc())
+        .limit(6)
+        .all()
+    )
+    recent_logs.reverse()
+    chat_history = ""
+    if recent_logs:
+        chat_history = "\n\nPrevious conversation:\n" + "\n".join(
+            f"User: {log.query_text}\nAssistant: {log.response_text}"
+            for log in recent_logs if log.response_text
+        ) + "\n\n"
+
+    system_prompt = """You are TenderIQ, an expert AI tender analyst. You answer questions about tender documents, BOQs, technical specs, and project requirements.
+
+Answer like a knowledgeable colleague in a chat — direct, clear, and conversational.
+
+Format every answer like this:
+1. **Bold title** that states what was asked
+2. A direct 1-2 line answer with the core value/fact
+3. **Key Details:** as bullet points with specific values, units, standards, classifications
+4. Do NOT add recommendations, suggestions, or opinions — only facts from the documents
+
+Rules:
+- Use **bold** for important values and labels
+- Use bullet points (- ) for lists
+- Include specific numbers, units, measurements, standards from the documents
+- Do NOT mention source documents or page numbers in your answer — they are shown separately
+- If info is not found, say clearly what is missing
+- Keep it concise — no filler, no repetition
+- For cost/BOQ questions, show itemized breakdowns with quantities and rates when available
+- Use the conversation history to understand follow-up questions in context"""
 
     response = gemini_client.models.generate_content(
-        model="gemini-3-flash-preview",
-        contents=f"Question: {query}\n\nContext:\n{context}",
+        model="gemini-2.0-flash",
+        contents=f"{chat_history}Question: {query}\n\nDocument Context:\n{context}",
         config=types.GenerateContentConfig(
             system_instruction=system_prompt,
-            max_output_tokens=500,
-            temperature=0.1,
+            max_output_tokens=2048,
+            temperature=0.3,
         ),
     )
 
     answer = response.text
+
+    sources = [
+        {
+            "document": chunk.document.original_filename,
+            "page": chunk.page_number,
+            "section": chunk.section_title,
+            "subsection": chunk.subsection_title,
+        }
+        for chunk in context_chunks[:5]
+    ]
 
     query_log = QueryLog(
         project_id=project_id,
         query_text=query,
         query_type="adhoc",
         response_text=answer,
-        num_sources_used=len(chunks),
+        sources_json=sources,
+        num_sources_used=len(context_chunks),
     )
     db.add(query_log)
     db.commit()
@@ -525,16 +1227,46 @@ async def adhoc_query(project_id: uuid.UUID, query: str = Form(...), db: Session
     return {
         "query": query,
         "answer": answer,
-        "sources": [
-            {
-                "document": chunk.document.original_filename,
-                "page": chunk.page_number,
-                "section": chunk.section_title,
-                "subsection": chunk.subsection_title,
-            }
-            for chunk in chunks[:3]
-        ],
+        "sources": sources,
     }
+
+
+@app.get("/projects/{project_id}/chat-history")
+async def get_chat_history(project_id: uuid.UUID, db: Session = Depends(get_db)):
+    """Return all chat messages for a project, ordered chronologically."""
+    logs = (
+        db.query(QueryLog)
+        .filter(QueryLog.project_id == project_id)
+        .order_by(QueryLog.created_at.asc())
+        .all()
+    )
+    messages = []
+    for log in logs:
+        messages.append({
+            "role": "user",
+            "type": "text",
+            "content": log.query_text,
+            "timestamp": log.created_at.isoformat() if log.created_at else None,
+        })
+        if log.response_text:
+            # Build source strings for display
+            source_strs = []
+            if log.sources_json:
+                for s in log.sources_json:
+                    label = s.get("document", "")
+                    if s.get("page"):
+                        label += f" · Page {s['page']}"
+                    if s.get("section"):
+                        label += f" · {s['section']}"
+                    source_strs.append(label)
+            messages.append({
+                "role": "assistant",
+                "type": "text",
+                "content": log.response_text,
+                "sources": source_strs,
+                "timestamp": log.created_at.isoformat() if log.created_at else None,
+            })
+    return {"messages": messages}
 
 
 @app.get("/me")

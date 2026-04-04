@@ -60,6 +60,11 @@ class ExtractedParameter(Base):
 
     notes: Mapped[str | None] = mapped_column(Text)
 
+    all_sources: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True
+    )  # JSON: [{"document_id": "...", "document": "file.pdf", "page": 12, "pages": [12, 15], "section": "..."}]
+
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP,
         server_default=func.now()

@@ -1,0 +1,45 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  FACADE EXTRACTOR — Specification Reference (OPTIONAL)
+#
+#  Supply this file with --spec to enable cross-checking extracted values
+#  against known spec values. Leave blank or omit if not needed.
+#
+#  parameter_name  : must match a 'name' field in parameter_catalog.yaml
+#  spec_value      : numeric target value
+#  unit            : unit of spec_value (will be normalised to mm internally)
+#  tolerance       : ± tolerance in same unit; 0.0 = strict minimum/maximum
+#  direction       : MIN | MAX | EXACT  (default: EXACT)
+#  source          : free-text reference (clause, standard, drawing note, etc.)
+# ─────────────────────────────────────────────────────────────────────────────
+
+spec_references:
+
+  # Example entries — replace or extend with project-specific values
+
+  - parameter_name: "Extrusion Wall Thickness"
+    spec_value: 2.0
+    unit: mm
+    tolerance: 0.0
+    direction: MIN
+    source: "EN 12608 / BS 4873 — min structural wall 2.0 mm"
+
+  - parameter_name: "Glass Thickness"
+    spec_value: 6.0
+    unit: mm
+    tolerance: 0.0
+    direction: MIN
+    source: "Project specification clause 3.2.1"
+
+  - parameter_name: "Joint Width"
+    spec_value: 15.0
+    unit: mm
+    tolerance: 3.0
+    direction: EXACT
+    source: "Movement joint design — sealant manufacturer requirement"
+
+  - parameter_name: "Handrail Height"
+    spec_value: 1100.0
+    unit: mm
+    tolerance: 50.0
+    direction: MIN
+    source: "BS EN 1991-1-1 / Building Regs Part K"

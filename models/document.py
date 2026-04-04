@@ -60,4 +60,19 @@ class Document(Base):
         default=0
     )
 
+    processing_status: Mapped[str] = mapped_column(
+        String(20),
+        default="pending"
+    )
+
+    processing_error: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True
+    )
+
+    page_count: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True
+    )
+
     project = relationship("Project", backref="documents")

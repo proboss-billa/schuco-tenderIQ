@@ -1,11 +1,14 @@
 # processing/document_processor.py
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import time
 from typing import List, Dict, Any
 import uuid
 from pathlib import Path
+
+from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 
 from google import genai
 from google.genai import types
@@ -34,6 +37,12 @@ CHILD_SIZE        = 200   # level-1 child chunk: ~200 words, precise for retriev
 PARENT_MAX_WORDS  = 3000  # level-0 parent cap: long sections are split here
 EMBED_BATCH_SIZE  = 64    # max texts per embedding API call
 PARAM_BATCH_SIZE  = 1800  # chunks sent per LLM parameter-extraction call
+
+# Streaming processing: number of sections processed per batch.
+# Each section typically contributes 1 parent + a few children.
+# At SECTION_BATCH=50 with ~3 children/section → ~150 child chunks per DB commit.
+# This keeps peak memory per batch small regardless of document size.
+SECTION_BATCH = 50
 
 # Legacy constants kept for reference — no longer used in new pipeline
 CHUNK_SIZE    = 512
@@ -146,40 +155,34 @@ class DocumentProcessor:
 
         return blocks
 
-    def _build_hierarchical_chunks(
-            self,
-            parsed_content: List[Dict],
-            document,
-    ) -> tuple[List[Dict], List[Dict]]:
+    # ── Streaming chunking pipeline ───────────────────────────────────────────
+    #
+    # Large documents (300+ pages) previously failed because:
+    #   1. ALL blocks were kept in memory simultaneously.
+    #   2. ALL child chunks were embedded in one pass before any DB writes.
+    #   3. One giant DB transaction held thousands of unsaved rows.
+    #
+    # The new approach splits the work into three clearly-separated phases:
+    #   Phase 1  _group_into_sections()       — lightweight, no UUIDs
+    #   Phase 2  _build_chunks_for_sections() — UUIDs, wiring, one section-batch
+    #   Phase 3  embed + _store_chunks()      — per-batch API calls + DB commit
+    #
+    # _process_specification_document() drives them in a loop of SECTION_BATCH
+    # sections at a time.  At any point, only ONE batch of parents + children +
+    # embeddings is in memory.
+
+    @staticmethod
+    def _group_into_sections(parsed_content: List[Dict]) -> List[Dict]:
         """
-        Build a two-level hierarchy of chunks from parsed document blocks.
+        Phase 1 — Group raw parsed blocks into contiguous section objects.
 
-        ── Level 0  (parent / section) ─────────────────────────────────────────
-        One chunk per contiguous (section, subsection) group.  Contains the
-        FULL concatenated text of that section.  Stored in PostgreSQL only —
-        NOT embedded or indexed in Pinecone.  Acts as the rich-context window
-        passed to the LLM after a child-level vector search hits.
+        Each section dict:
+            {sec_key, section, subsection, page_start, page_end,
+             all_words: List[str], is_table: bool}
 
-        ── Level 1  (child / paragraph) ────────────────────────────────────────
-        ~CHILD_SIZE-word slices within each section, with NO overlap (the
-        parent already provides surrounding context).  These are embedded and
-        indexed in Pinecone for precise retrieval.
-
-        Each child stores:
-          parent_chunk_id → the level-0 chunk for its section
-          prev_chunk_id   → previous sibling in the same section
-          next_chunk_id   → next sibling in the same section
-
-        Very long sections (> PARENT_MAX_WORDS) are split into multiple parent
-        chunks so the LLM context window is never overwhelmed.
-
-        Returns
-        -------
-        (parent_chunks, child_chunks)  –  plain dicts (no SQLAlchemy objects).
-        Each dict contains a pre-assigned ``chunk_id`` UUID so that children
-        can reference parent IDs before any DB write.
+        This is a lightweight pass — no UUIDs, no embedding.  It converts
+        blocks (which include headings) into text-bearing section buckets.
         """
-        # ── Phase 1: group blocks into contiguous sections ───────────────────
         sections: List[Dict] = []
         current: Dict | None = None
 
@@ -190,13 +193,17 @@ class DocumentProcessor:
             sec_key = (block.get("section"), block.get("subsection"))
             if current is None or current["sec_key"] != sec_key:
                 current = {
-                    "sec_key":   sec_key,
-                    "section":   block.get("section"),
+                    "sec_key":    sec_key,
+                    "section":    block.get("section"),
                     "subsection": block.get("subsection"),
                     "page_start": block.get("page"),
                     "page_end":   block.get("page"),
                     "all_words":  [],
                     "is_table":   block["type"] == "table",
+                    # source_type drives Pinecone routing — 'pdf_drawing' wins over
+                    # 'pdf_spec' within a section so drawing pages are not diluted
+                    # by neighbouring text-extraction blocks.
+                    "source_type": block.get("source_type"),
                 }
                 sections.append(current)
 
@@ -205,19 +212,43 @@ class DocumentProcessor:
                 current["page_end"] = block.get("page")
             if block["type"] != "table":
                 current["is_table"] = False   # mixed → not a pure table section
+            # Escalate to pdf_drawing if ANY block in this section is from Vision
+            if block.get("source_type") == "pdf_drawing":
+                current["source_type"] = "pdf_drawing"
 
-        # ── Phase 2: produce parent + child chunks ───────────────────────────
+        return sections
+
+    def _build_chunks_for_sections(
+            self,
+            sections: List[Dict],
+            document,
+            chunk_idx_start: int = 0,
+    ) -> tuple[List[Dict], List[Dict], int]:
+        """
+        Phase 2 — Build parent + child chunk dicts for a batch of sections.
+
+        Returns (parents, children, next_chunk_idx).
+
+        ── Level 0  (parent / section) ─────────────────────────────────────────
+        One parent per contiguous (section, subsection) group (or per
+        PARENT_MAX_WORDS window if the section is very long).  Stored in
+        PostgreSQL ONLY — not embedded or indexed in Pinecone.  Acts as the
+        rich context window given to the LLM.
+
+        ── Level 1  (child / paragraph) ────────────────────────────────────────
+        ~CHILD_SIZE-word slices within each parent window, embedded and
+        indexed in Pinecone for precise retrieval.  Each child stores
+        parent_chunk_id, prev_chunk_id, next_chunk_id.
+        """
         parents:  List[Dict] = []
         children: List[Dict] = []
-        chunk_idx = 0   # shared sequential counter preserves document order
+        chunk_idx = chunk_idx_start
 
         for sec in sections:
             all_words = sec["all_words"]
             if not all_words:
                 continue
 
-            # Split very long sections into ≤PARENT_MAX_WORDS parent windows
-            # so no single LLM context is gigantic.
             for p_start in range(0, len(all_words), PARENT_MAX_WORDS):
                 parent_words = all_words[p_start : p_start + PARENT_MAX_WORDS]
                 parent_id    = uuid.uuid4()
@@ -229,6 +260,7 @@ class DocumentProcessor:
                     "text":            " ".join(parent_words),
                     "document_id":     document.document_id,
                     "file_type":       document.file_type,
+                    "source_type":     sec.get("source_type") or document.file_type or "pdf_spec",
                     "page_start":      sec["page_start"],
                     "page_end":        sec["page_end"],
                     "section":         sec["section"],
@@ -240,7 +272,6 @@ class DocumentProcessor:
                 })
                 chunk_idx += 1
 
-                # Slice parent into CHILD_SIZE children
                 section_children: List[Dict] = []
                 for c_start in range(0, len(parent_words), CHILD_SIZE):
                     child_words = parent_words[c_start : c_start + CHILD_SIZE]
@@ -253,13 +284,14 @@ class DocumentProcessor:
                         "text":            " ".join(child_words),
                         "document_id":     document.document_id,
                         "file_type":       document.file_type,
+                        "source_type":     sec.get("source_type") or document.file_type or "pdf_spec",
                         "page_start":      sec["page_start"],
                         "page_end":        sec["page_end"],
                         "section":         sec["section"],
                         "subsection":      sec["subsection"],
                         "is_table":        False,
                         "parent_chunk_id": parent_id,
-                        "prev_chunk_id":   None,   # wired below
+                        "prev_chunk_id":   None,
                         "next_chunk_id":   None,
                     })
                     chunk_idx += 1
@@ -272,25 +304,64 @@ class DocumentProcessor:
 
                 children.extend(section_children)
 
-        logger.info(
-            f"[CHUNK] doc={document.original_filename}: "
-            f"{len(parents)} section-parents, {len(children)} child chunks"
-        )
-        return parents, children
+        return parents, children, chunk_idx
+
+    @retry(
+        retry=retry_if_exception_type(Exception),
+        wait=wait_exponential(multiplier=1, min=4, max=30),
+        stop=stop_after_attempt(3),
+        before_sleep=lambda rs: logger.warning(
+            f"[EMBED] Retry {rs.attempt_number} after error: {rs.outcome.exception()}"
+        ),
+    )
+    def _embed_with_retry(self, texts: List[str]) -> List[List[float]]:
+        """Single embedding batch call with tenacity retry."""
+        return self.embedder.embed(texts)
 
     def _generate_embeddings(self, texts: List[str]) -> List[List[float]]:
         """
         Call the embedding client in batches to avoid hitting API size limits.
-        Assumes self.embedder exposes:
-            embedder.embed(texts: List[str]) -> List[List[float]]
+        Uses parallel threads for 3+ batches to speed up large documents.
         """
-        all_embeddings: List[List[float]] = []
+        EMBED_WORKERS = 3
+        t0 = time.perf_counter()
 
+        batches = []
         for start in range(0, len(texts), EMBED_BATCH_SIZE):
-            batch = texts[start: start + EMBED_BATCH_SIZE]
-            batch_embeddings = self.embedder.embed(batch)
-            all_embeddings.extend(batch_embeddings)
+            batches.append(texts[start: start + EMBED_BATCH_SIZE])
 
+        if len(batches) <= 2:
+            # Few batches — sequential is fine, avoid thread overhead
+            all_embeddings: List[List[float]] = []
+            for batch_num, batch in enumerate(batches, 1):
+                bt = time.perf_counter()
+                batch_embeddings = self._embed_with_retry(batch)
+                logger.info(
+                    f"[TIMING][EMBED] batch {batch_num} ({len(batch)} texts): "
+                    f"{time.perf_counter() - bt:.2f}s"
+                )
+                all_embeddings.extend(batch_embeddings)
+        else:
+            # Multiple batches — parallelize
+            ordered_results: List[List[List[float]] | None] = [None] * len(batches)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=EMBED_WORKERS) as executor:
+                future_to_idx = {
+                    executor.submit(self._embed_with_retry, batch): i
+                    for i, batch in enumerate(batches)
+                }
+                for future in concurrent.futures.as_completed(future_to_idx):
+                    idx = future_to_idx[future]
+                    ordered_results[idx] = future.result()
+
+            all_embeddings = []
+            for batch_result in ordered_results:
+                all_embeddings.extend(batch_result)
+
+        logger.info(
+            f"[TIMING][EMBED] total {len(texts)} texts in "
+            f"{len(all_embeddings)} embeddings ({len(batches)} batches): "
+            f"{time.perf_counter() - t0:.2f}s"
+        )
         return all_embeddings
 
     def _store_chunks(
@@ -308,6 +379,7 @@ class DocumentProcessor:
 
         Pinecone vector id format: "{document_id}_{chunk_index}"
         """
+        t0 = time.perf_counter()
         # ── Insert level-0 parent chunks (DB only) ────────────────────────────
         for chunk in parent_chunks:
             db_chunk = DocumentChunk(
@@ -353,31 +425,44 @@ class DocumentProcessor:
             )
             self.db.add(db_chunk)
 
+            # Pinecone rejects null metadata values — coerce every field to a
+            # concrete type.  chunk.get("source_type") may be None even when the
+            # key exists (e.g. chunks built from sections where source_type was
+            # never set), so use `or` to fall through to the document-level default.
             pinecone_vectors.append({
                 "id": vector_id,
                 "values": embedding,
                 "metadata": {
                     "document_id": str(document.document_id),
                     "project_id":  str(self.project_id),
-                    "file_type":   document.file_type,
+                    "file_type":   chunk.get("source_type") or document.file_type or "pdf_spec",
                     "section":     chunk.get("section") or "",
                     "subsection":  chunk.get("subsection") or "",
                     "page_start":  chunk.get("page_start") or 0,
                     "is_table":    chunk.get("is_table", False),
                     "chunk_level": 1,
-                    "text_preview": chunk["text"][:200],
+                    "text_preview": (chunk["text"] or "")[:200],
                 },
             })
 
+        t_flush = time.perf_counter()
         # Batch-upsert to Pinecone (max 100 vectors per call)
         PINECONE_BATCH = 100
         for start in range(0, len(pinecone_vectors), PINECONE_BATCH):
             self.pinecone.upsert(vectors=pinecone_vectors[start: start + PINECONE_BATCH])
+        t_pine = time.perf_counter()
 
         self.db.commit()
+        logger.info(
+            f"[TIMING][STORE] {len(parent_chunks)} parents + {len(child_chunks)} children — "
+            f"DB flush: {t_flush - t0:.2f}s | "
+            f"Pinecone upsert: {t_pine - t_flush:.2f}s | "
+            f"DB commit: {time.perf_counter() - t_pine:.2f}s | "
+            f"total: {time.perf_counter() - t0:.2f}s"
+        )
 
-    def _parse_excel_boq(self, file_path: str) -> List[Dict]:
-        """Delegate to ExcelBOQParser."""
+    def _parse_excel_boq(self, file_path: str):
+        """Delegate to ExcelBOQParser. Returns (boq_items, text_chunks)."""
         parser = ExcelBOQParser()
         return parser.parse(file_path)
 
@@ -521,47 +606,210 @@ class DocumentProcessor:
         ).all()
 
         for doc in documents:
+            doc.processing_status = "processing"
+            self.db.commit()
             try:
                 if doc.file_type in ['pdf_spec', 'docx_spec']:
                     self._process_specification_document(doc)
                 elif doc.file_type == 'excel_boq':
                     self._process_boq_document(doc)
+                doc.processing_status = "completed"
+                self.db.commit()
             except Exception as e:
                 logger.error(f"Failed to process {doc.original_filename}: {e}")
+                try:
+                    self.db.rollback()
+                except Exception:
+                    pass
+                try:
+                    doc.processing_status = "failed"
+                    doc.processing_error = str(e)[:1000]
+                    self.db.commit()
+                except Exception:
+                    pass
+                # Continue with other documents — don't abort the whole project
 
         self._extract_all_parameters()
 
-    def _process_specification_document(self, document):
-        """Process PDF/DOCX specification using hierarchical chunking."""
+    def _choose_pdf_parser(self, file_path: str):
+        """
+        Sample the first 5 pages to decide between text-extraction and vision parsing.
 
-        # Step 1: Parse document into raw blocks
-        if document.file_type == 'pdf_spec':
-            parsed_content = self._parse_pdf(document.file_path)
+        Drawing PDFs (CAD sheets rendered to PDF) have virtually no selectable
+        text — PyMuPDF returns < MIN_TEXT_CHARS characters per page.
+        Text-heavy specification documents have hundreds of chars per page.
+        """
+        import fitz as _fitz
+        MIN_TEXT_CHARS = 100
+        sample_doc = _fitz.open(file_path)
+        sample_n   = min(5, len(sample_doc))
+        total_chars = sum(
+            len(sample_doc[i].get_text("text").strip()) for i in range(sample_n)
+        )
+        sample_doc.close()
+        avg = total_chars / sample_n if sample_n else 0
+
+        if avg < MIN_TEXT_CHARS:
+            logger.info(
+                f"[AUTO-DETECT] {file_path}: avg {avg:.0f} chars/page "
+                f"→ DRAWING PDF — using Gemini Vision parser"
+            )
+            from parsing.drawing_pdf_parser import DrawingPDFParser
+            return DrawingPDFParser()
+        else:
+            logger.info(
+                f"[AUTO-DETECT] {file_path}: avg {avg:.0f} chars/page "
+                f"→ TEXT PDF — using standard parser"
+            )
+            from parsing.pdf_parser import PDFParser
+            return PDFParser()
+
+    def _process_specification_document(self, document):
+        """
+        Process a PDF/DOCX specification using the streaming hierarchical pipeline.
+
+        Memory model
+        ────────────
+        The pipeline processes SECTION_BATCH sections at a time so that only
+        one small batch of parents + children + embeddings is ever in memory
+        simultaneously.  This allows arbitrarily large documents (400+ pages)
+        to be processed without hitting memory limits.
+
+        Pipeline per batch
+        ──────────────────
+        1. _group_into_sections()         — parse blocks into section objects
+        2. _build_chunks_for_sections()   — assign UUIDs, wire prev/next links
+        3. _generate_embeddings()         — embed child texts (64 per API call)
+        4. _store_chunks()                — INSERT to PostgreSQL + Pinecone, commit
+        5. del parents/children/embeddings — release batch memory
+        """
+        doc_name = document.original_filename
+        t_doc_start = time.perf_counter()
+
+        # ── Step 0: Idempotent cleanup — delete any chunks from interrupted runs ──
+        # If a previous pipeline was killed mid-way (e.g. uvicorn --reload fired
+        # while a run_in_executor thread was still inserting), orphaned chunks
+        # remain committed and cause UniqueViolation on the next run.
+        from sqlalchemy import text as _sa_text
+        try:
+            # Rollback any pending transaction first so the session is clean
+            self.db.rollback()
+            result = self.db.execute(
+                _sa_text("DELETE FROM document_chunks WHERE document_id = :did"),
+                {"did": document.document_id},
+            )
+            deleted_count = result.rowcount
+            self.db.commit()
+            if deleted_count > 0:
+                logger.info(f"[PARSE] {doc_name}: deleted {deleted_count} orphaned chunks before re-parse")
+        except Exception as _cleanup_err:
+            logger.warning(f"[PARSE] {doc_name}: chunk cleanup failed (non-fatal): {_cleanup_err}")
+            try:
+                self.db.rollback()
+            except Exception:
+                pass
+
+        # ── Step 1: Parse ─────────────────────────────────────────────────────
+        t0 = time.perf_counter()
+        if document.file_type in ('pdf_spec', 'pdf_drawing'):
+            # pdf_drawing → always hybrid vision parser (skip char-count sampling).
+            # pdf_spec    → auto-detect via char count; vision used if drawing-heavy.
+            if document.file_type == 'pdf_drawing':
+                from parsing.drawing_pdf_parser import DrawingPDFParser
+                parser = DrawingPDFParser()
+                logger.info(f"[PARSE] {doc_name}: pdf_drawing → forced DrawingPDFParser")
+            else:
+                parser = self._choose_pdf_parser(document.file_path)
+            parsed_content, page_count = parser.parse_with_page_count(document.file_path)
+            document.page_count = page_count
+        elif document.file_type in ('dxf_drawing', 'dwg_drawing'):
+            from parsing.dxf_parser import DXFParser
+            parsed_content = DXFParser().parse(document.file_path)
         else:  # docx_spec
             parsed_content = self._parse_docx(document.file_path)
+        logger.info(f"[TIMING][PARSE] {doc_name}: {time.perf_counter() - t0:.2f}s")
 
-        # Step 2: Build section-parent + paragraph-child chunk hierarchy
-        parents, children = self._build_hierarchical_chunks(parsed_content, document)
+        # ── Step 2: Group into sections (lightweight — no UUIDs) ──────────────
+        t0 = time.perf_counter()
+        sections = self._group_into_sections(parsed_content)
+        del parsed_content   # free raw block memory — no longer needed
+        logger.info(f"[TIMING][SECTION_GROUP] {doc_name}: {time.perf_counter() - t0:.2f}s")
 
-        # Step 3: Embed only child chunks (parents are context, not queries)
-        child_embeddings = self._generate_embeddings([c['text'] for c in children])
+        total_sections = len(sections)
+        total_batches  = max(1, (total_sections + SECTION_BATCH - 1) // SECTION_BATCH)
+        logger.info(
+            f"[CHUNK] {doc_name}: {total_sections} sections "
+            f"→ {total_batches} streaming batch(es) of up to {SECTION_BATCH}"
+        )
 
-        # Step 4: Store parents (DB only) + children (DB + Pinecone)
-        self._store_chunks(parents, children, child_embeddings, document)
+        # ── Steps 3–6: Stream — build UUIDs → embed → store → free ───────────
+        chunk_idx      = 0
+        total_children = 0
 
-        # Mark as processed — report searchable child count
-        document.processed = True
-        document.num_chunks = len(children)
+        for batch_num, batch_start in enumerate(range(0, total_sections, SECTION_BATCH), 1):
+            batch = sections[batch_start : batch_start + SECTION_BATCH]
+            t_batch = time.perf_counter()
+
+            t0 = time.perf_counter()
+            parents, children, chunk_idx = self._build_chunks_for_sections(
+                batch, document, chunk_idx_start=chunk_idx
+            )
+            logger.info(
+                f"[TIMING][BUILD_CHUNKS] {doc_name} batch {batch_num}/{total_batches}: "
+                f"{time.perf_counter() - t0:.2f}s ({len(children)} children)"
+            )
+            if not children:
+                continue
+
+            child_embeddings = self._generate_embeddings([c["text"] for c in children])
+
+            t0 = time.perf_counter()
+            self._store_chunks(parents, children, child_embeddings, document)
+            total_children += len(children)
+
+            logger.info(
+                f"[TIMING][BATCH] {doc_name} batch {batch_num}/{total_batches}: "
+                f"total {time.perf_counter() - t_batch:.2f}s | "
+                f"running total: {total_children} child chunks"
+            )
+
+            # Explicitly release this batch to keep peak memory small
+            del parents, children, child_embeddings
+
+        del sections
+
+        # ── Mark as processed ─────────────────────────────────────────────────
+        document.processed  = True
+        document.num_chunks = total_children
         self.db.commit()
+        logger.info(
+            f"[TIMING][DOC_TOTAL] {doc_name}: {time.perf_counter() - t_doc_start:.2f}s — "
+            f"{total_children} searchable child chunks"
+        )
 
     def _process_boq_document(self, document):
-        """Process Excel BOQ — store items in PostgreSQL and embed into Pinecone."""
-        try:
-            boq_items = self._parse_excel_boq(document.file_path)
-        except Exception as e:
-            logger.warning(f"Skipping BOQ parsing for {document.original_filename}: {e}")
-            boq_items = []
+        """Process spreadsheet BOQ — store structured items in PostgreSQL and
+        embed both structured items AND raw text chunks into Pinecone.
 
+        The parser always produces text_chunks (raw row-level text from every
+        sheet) so even non-standard layouts get indexed for LLM retrieval.
+        """
+        doc_name = document.original_filename
+        t_doc_start = time.perf_counter()
+
+        # ── Step 1: Parse spreadsheet ────────────────────────────────────────
+        t0 = time.perf_counter()
+        try:
+            boq_items, text_chunks = self._parse_excel_boq(document.file_path)
+        except Exception as e:
+            logger.warning(f"Skipping BOQ parsing for {doc_name}: {e}")
+            boq_items, text_chunks = [], []
+        logger.info(
+            f"[TIMING][BOQ_PARSE] {doc_name}: {time.perf_counter() - t0:.2f}s "
+            f"({len(boq_items)} items, {len(text_chunks)} text chunks)"
+        )
+
+        # ── Step 2: Store structured BOQ items in PostgreSQL ─────────────────
         valid_items = []
         for item in boq_items:
             try:
@@ -576,63 +824,92 @@ class DocumentProcessor:
                 logger.warning(f"Skipping BOQ item: {e}")
                 continue
 
-        # Build a rich text representation for each item and embed into Pinecone
-        if valid_items:
-            texts = []
-            for item in valid_items:
-                parts = []
-                if item.get("item_number"):
-                    parts.append(f"Item: {item['item_number']}")
-                if item.get("description"):
-                    parts.append(f"Description: {item['description']}")
-                if item.get("quantity") is not None:
-                    parts.append(f"Quantity: {item['quantity']} {item.get('unit') or ''}")
-                if item.get("rate") is not None:
-                    parts.append(f"Rate: {item['rate']}")
-                if item.get("amount") is not None:
-                    parts.append(f"Amount: {item['amount']}")
-                if item.get("category"):
-                    parts.append(f"Category: {item['category']}")
-                if item.get("sub_category"):
-                    parts.append(f"Sub-category: {item['sub_category']}")
-                texts.append(" | ".join(parts))
+        # ── Step 3: Build texts for embedding ────────────────────────────────
+        # 3a. Structured item texts
+        item_texts = []
+        for item in valid_items:
+            parts = []
+            if item.get("item_number"):
+                parts.append(f"Item: {item['item_number']}")
+            if item.get("description"):
+                parts.append(f"Description: {item['description']}")
+            if item.get("quantity") is not None:
+                parts.append(f"Quantity: {item['quantity']} {item.get('unit') or ''}")
+            if item.get("rate") is not None:
+                parts.append(f"Rate: {item['rate']}")
+            if item.get("amount") is not None:
+                parts.append(f"Amount: {item['amount']}")
+            if item.get("category"):
+                parts.append(f"Category: {item['category']}")
+            if item.get("sub_category"):
+                parts.append(f"Sub-category: {item['sub_category']}")
+            item_texts.append(" | ".join(parts))
 
-            embeddings = self._generate_embeddings(texts)
+        # 3b. Combine: structured items first, then raw text chunks
+        all_texts = item_texts + text_chunks
+        if not all_texts:
+            logger.warning(f"[BOQ] {doc_name}: no content extracted — marking done")
+            document.processed = True
+            self.db.commit()
+            return
 
-            pinecone_vectors = []
-            for chunk_index, (item, text, embedding) in enumerate(zip(valid_items, texts, embeddings)):
-                vector_id = f"{document.document_id}_boq_{chunk_index}"
+        # ── Step 4: Embed everything ─────────────────────────────────────────
+        t0 = time.perf_counter()
+        embeddings = self._generate_embeddings(all_texts)
+        logger.info(f"[TIMING][BOQ_EMBED] {doc_name}: {time.perf_counter() - t0:.2f}s ({len(all_texts)} texts)")
 
-                db_chunk = DocumentChunk(
-                    document_id=document.document_id,
-                    project_id=self.project_id,
-                    chunk_index=chunk_index,
-                    chunk_text=text,
-                    page_number=None,
-                    section_title=item.get("category"),
-                    subsection_title=item.get("sub_category"),
-                    pinecone_id=vector_id,
-                )
-                self.db.add(db_chunk)
+        # ── Step 5: Store chunks + upsert to Pinecone ────────────────────────
+        pinecone_vectors = []
+        for chunk_index, (text, embedding) in enumerate(zip(all_texts, embeddings)):
+            is_structured = chunk_index < len(item_texts)
+            vector_id = f"{document.document_id}_boq_{chunk_index}"
 
-                pinecone_vectors.append({
-                    "id": vector_id,
-                    "values": embedding,
-                    "metadata": {
-                        "document_id": str(document.document_id),
-                        "project_id": str(self.project_id),
-                        "file_type": document.file_type,
-                        "section": item.get("category") or "",
-                        "subsection": item.get("sub_category") or "",
-                        "page_start": 0,
-                        "is_table": False,
-                        "text_preview": text[:200],
-                    },
-                })
+            # Section title from structured item, or sheet name from text chunk
+            section = ""
+            subsection = ""
+            if is_structured and chunk_index < len(valid_items):
+                section = valid_items[chunk_index].get("category") or ""
+                subsection = valid_items[chunk_index].get("sub_category") or ""
+            elif not is_structured:
+                # Text chunks start with "Sheet: <name>\n"
+                first_line = text.split("\n", 1)[0] if text else ""
+                if first_line.startswith("Sheet:"):
+                    section = first_line.replace("Sheet:", "").strip()
 
-            PINECONE_BATCH = 100
-            for start in range(0, len(pinecone_vectors), PINECONE_BATCH):
-                self.pinecone.upsert(vectors=pinecone_vectors[start: start + PINECONE_BATCH])
+            db_chunk = DocumentChunk(
+                document_id=document.document_id,
+                project_id=self.project_id,
+                chunk_index=chunk_index,
+                chunk_text=text,
+                page_number=None,
+                section_title=section or None,
+                subsection_title=subsection or None,
+                pinecone_id=vector_id,
+            )
+            self.db.add(db_chunk)
+
+            pinecone_vectors.append({
+                "id": vector_id,
+                "values": embedding,
+                "metadata": {
+                    "document_id": str(document.document_id),
+                    "project_id": str(self.project_id),
+                    "file_type": document.file_type or "excel_boq",
+                    "section": section,
+                    "subsection": subsection,
+                    "page_start": 0,
+                    "is_table": True,
+                    "text_preview": text[:200],
+                },
+            })
+
+        t0 = time.perf_counter()
+        PINECONE_BATCH = 100
+        for start in range(0, len(pinecone_vectors), PINECONE_BATCH):
+            self.pinecone.upsert(vectors=pinecone_vectors[start: start + PINECONE_BATCH])
+        logger.info(f"[TIMING][BOQ_PINECONE] {doc_name}: {time.perf_counter() - t0:.2f}s ({len(pinecone_vectors)} vectors)")
 
         document.processed = True
+        document.num_chunks = len(all_texts)
         self.db.commit()
+        logger.info(f"[TIMING][BOQ_TOTAL] {doc_name}: {time.perf_counter() - t_doc_start:.2f}s ({len(all_texts)} chunks)")

@@ -1,0 +1,173 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  FACADE EXTRACTOR — Layer Keyword Groups
+#
+#  Each group contains lowercase keywords. Layer names are lowercased before
+#  matching. Score = number of keyword matches. Threshold for candidacy = 1.
+#
+#  Users can add project-specific abbreviations without touching code.
+# ─────────────────────────────────────────────────────────────────────────────
+
+layer_groups:
+
+  structural_frame:
+    keywords:
+      - mullion
+      - transom
+      - frame
+      - curtain
+      - unitized
+      - unitised
+      - stick
+      - system
+      - cw
+      - post
+      - rail
+      - profile
+      - extrusion
+      - aluminium
+      - aluminum
+      - framing
+      - structural
+    threshold: 1
+
+  glazing:
+    keywords:
+      - glass
+      - glaz
+      - vision
+      - spandrel
+      - dgu
+      - igs
+      - igu
+      - ssg
+      - insulating
+      - laminated
+      - pane
+      - lite
+      - clear
+      - tinted
+      - frit
+    threshold: 1
+
+  fixings:
+    keywords:
+      - bracket
+      - anchor
+      - bolt
+      - fixing
+      - fastener
+      - insert
+      - plate
+      - cleat
+      - clip
+      - toggle
+      - rod
+      - stud
+      - screw
+      - rivet
+      - cast-in
+    threshold: 1
+
+  sealing:
+    keywords:
+      - sealant
+      - silicone
+      - gasket
+      - seal
+      - epdm
+      - weatherseal
+      - weatherstrip
+      - backer
+      - joint
+      - mastic
+      - neoprene
+      - tape
+      - foam
+    threshold: 1
+
+  insulation:
+    keywords:
+      - insul
+      - firestop
+      - fire
+      - smoke
+      - rockwool
+      - mineral
+      - thermal
+      - intumescent
+      - barrier
+      - cavity
+      - blanket
+      - board
+    threshold: 1
+
+  cladding:
+    keywords:
+      - acp
+      - cladding
+      - panel
+      - cassette
+      - rainscreen
+      - composite
+      - spandrel
+      - soffit
+      - fascia
+      - coping
+      - stone
+      - terracotta
+      - hpl
+      - grc
+    threshold: 1
+
+  railing:
+    keywords:
+      - railing
+      - balustrade
+      - handrail
+      - baluster
+      - post
+      - guard
+      - barrier
+      - infill
+      - picket
+      - cap
+    threshold: 1
+
+  annotation:
+    keywords:
+      - dim
+      - text
+      - anno
+      - note
+      - label
+      - tag
+      - call
+      - hatch
+      - symbol
+      - mark
+      - keynote
+      - leader
+      - ref
+    threshold: 1
+
+  titleblock:
+    keywords:
+      - title
+      - border
+      - sheet
+      - rev
+      - drawn
+      - checked
+      - scale
+      - project
+      - issue
+      - date
+      - number
+      - approved
+      - stamp
+    threshold: 1
+
+# ─── Scoring rules ────────────────────────────────────────────────────────────
+# A layer is a CANDIDATE for a group if score >= group.threshold
+# The PRIMARY layer for a group is the one with the highest score.
+# Ties: use the layer with the most entities.

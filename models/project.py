@@ -29,9 +29,22 @@ class Project(Base):
         nullable=True
     )
 
+    # "commercial" or "residential"
+    project_type: Mapped[str] = mapped_column(
+        String(20),
+        default="commercial",
+        nullable=False,
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP,
         server_default=func.now()
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP,
+        server_default=func.now(),
+        onupdate=func.now(),
     )
 
     processing_status: Mapped[str] = mapped_column(
@@ -50,6 +63,11 @@ class Project(Base):
     )
 
     error_message: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True
+    )
+
+    pipeline_step: Mapped[str | None] = mapped_column(
         Text,
         nullable=True
     )
