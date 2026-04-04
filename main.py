@@ -219,6 +219,10 @@ def on_startup():
         conn.execute(text(
             "ALTER TABLE projects ADD COLUMN IF NOT EXISTS pipeline_step TEXT"
         ))
+        # ── Sources JSON in query_log for chat history persistence ────────────
+        conn.execute(text(
+            "ALTER TABLE query_log ADD COLUMN IF NOT EXISTS sources_json JSONB"
+        ))
         # ── Project type (commercial / residential) and updated_at ────────────
         conn.execute(text(
             "ALTER TABLE projects ADD COLUMN IF NOT EXISTS "
@@ -1031,11 +1035,22 @@ Guidelines:
 
     answer = response.text
 
+    sources = [
+        {
+            "document": chunk.document.original_filename,
+            "page": chunk.page_number,
+            "section": chunk.section_title,
+            "subsection": chunk.subsection_title,
+        }
+        for chunk in context_chunks[:5]
+    ]
+
     query_log = QueryLog(
         project_id=project_id,
         query_text=query,
         query_type="adhoc",
         response_text=answer,
+        sources_json=sources,
         num_sources_used=len(context_chunks),
     )
     db.add(query_log)
@@ -1044,15 +1059,7 @@ Guidelines:
     return {
         "query": query,
         "answer": answer,
-        "sources": [
-            {
-                "document": chunk.document.original_filename,
-                "page": chunk.page_number,
-                "section": chunk.section_title,
-                "subsection": chunk.subsection_title,
-            }
-            for chunk in context_chunks[:3]
-        ],
+        "sources": sources,
     }
 
 
@@ -1074,10 +1081,21 @@ async def get_chat_history(project_id: uuid.UUID, db: Session = Depends(get_db))
             "timestamp": log.created_at.isoformat() if log.created_at else None,
         })
         if log.response_text:
+            # Build source strings for display
+            source_strs = []
+            if log.sources_json:
+                for s in log.sources_json:
+                    label = s.get("document", "")
+                    if s.get("page"):
+                        label += f" · Page {s['page']}"
+                    if s.get("section"):
+                        label += f" · {s['section']}"
+                    source_strs.append(label)
             messages.append({
                 "role": "assistant",
                 "type": "text",
                 "content": log.response_text,
+                "sources": source_strs,
                 "timestamp": log.created_at.isoformat() if log.created_at else None,
             })
     return {"messages": messages}

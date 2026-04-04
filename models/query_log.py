@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
-    String, Text, Integer, TIMESTAMP, ForeignKey
+    String, Text, Integer, TIMESTAMP, ForeignKey, JSON
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -31,6 +31,8 @@ class QueryLog(Base):
     query_type: Mapped[str | None] = mapped_column(String(50))
 
     response_text: Mapped[str | None] = mapped_column(Text)
+
+    sources_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     response_time_ms: Mapped[int | None] = mapped_column(Integer)
     num_sources_used: Mapped[int | None] = mapped_column(Integer)
