@@ -76,15 +76,21 @@ class ParameterExtractor:
 
     @staticmethod
     def _chunk_to_dict(chunk, score: float) -> Dict:
+        from services.file_classifier import get_document_role
+        doc_name = chunk.document.original_filename if chunk.document else None
+        file_type = chunk.document.file_type if chunk.document else "unknown"
+        doc_role = get_document_role(doc_name) if doc_name else "unknown"
         return {
             'chunk_text':       chunk.chunk_text,
             'page_number':      chunk.page_number,
             'section_title':    chunk.section_title,
             'subsection_title': chunk.subsection_title,
-            'document_name':    chunk.document.original_filename if chunk.document else None,
+            'document_name':    doc_name,
             'document_id':      str(chunk.document_id),
             'chunk_id':         str(chunk.chunk_id),
             'chunk_level':      getattr(chunk, 'chunk_level', 1),
+            'file_type':        file_type,
+            'doc_role':         doc_role,
             'score':            score,
         }
 
@@ -92,8 +98,9 @@ class ParameterExtractor:
     def _build_context(chunk_dicts: List[Dict], max_sources: int = 6) -> str:
         parts = []
         for i, c in enumerate(chunk_dicts[:max_sources], 1):
+            role_tag = f" | Type: {c.get('doc_role', 'spec').upper()}" if c.get('doc_role') else ""
             parts.append(
-                f"[Source {i} | Doc: {c['document_name']} | Pg.{c['page_number']} | "
+                f"[Source {i} | Doc: {c['document_name']}{role_tag} | Pg.{c['page_number']} | "
                 f"Section: {c['section_title'] or 'N/A'}]\n"
                 f"{c['chunk_text']}"
             )
@@ -101,12 +108,33 @@ class ParameterExtractor:
 
     @staticmethod
     def _build_full_context(chunk_dicts: List[Dict]) -> str:
-        """Lightweight context for full-document mode — minimal headers to save tokens."""
+        """Context for full-document mode — includes document role for multi-doc awareness."""
+        # Group chunks by document for a clear document map
+        doc_chunks: Dict[str, List] = {}
+        for c in chunk_dicts:
+            doc_name = c['document_name'] or 'Unknown'
+            if doc_name not in doc_chunks:
+                doc_chunks[doc_name] = []
+            doc_chunks[doc_name].append(c)
+
+        # Build document inventory header
+        doc_inventory = []
+        for doc_name, chunks in doc_chunks.items():
+            role = chunks[0].get('doc_role', 'specification')
+            file_type = chunks[0].get('file_type', 'unknown')
+            doc_inventory.append(f"  - {doc_name} [{role.upper()}] ({len(chunks)} sections)")
+
+        header = "DOCUMENT INVENTORY:\n" + "\n".join(doc_inventory) + "\n\n---\n\n"
+
+        # Build content with role tags
         parts = []
         for i, c in enumerate(chunk_dicts, 1):
-            header = f"[{i}|{c['document_name']}|p.{c['page_number']}]"
-            parts.append(f"{header}\n{c['chunk_text']}")
-        return "\n\n".join(parts)
+            role = c.get('doc_role', 'spec').upper()
+            page = c['page_number'] or 'N/A'
+            tag = f"[{i}|{c['document_name']}|{role}|p.{page}]"
+            parts.append(f"{tag}\n{c['chunk_text']}")
+
+        return header + "\n\n".join(parts)
 
     def _compute_param_batch_size(self) -> int:
         """Calculate optimal number of params per LLM call based on model's output limit."""
@@ -363,9 +391,16 @@ class ParameterExtractor:
             for p in all_params
         )
 
-        prompt = f"""Extract ALL {len(all_params)} parameters from the COMPLETE document text below.
+        prompt = f"""Extract ALL {len(all_params)} parameters from the COMPLETE project documents below.
 
-You have the FULL document — every parameter that exists MUST be found.
+This project contains MULTIPLE document types (specifications, drawings, BOQ/spreadsheets, GCC, etc.).
+Each source is tagged with its document type. Search ALL documents — parameters may be spread across different files:
+- SPECIFICATION docs: technical requirements, performance values, material specs
+- DRAWING docs: dimensions, profiles, glass sizes, mullion spacing, sill heights
+- BOQ docs: quantities, material descriptions, item specifications, rates
+- GCC docs: warranty terms, testing requirements, compliance standards
+- MATRIX docs: compliance data, comparison values, checklists
+
 Use domain expertise: recognize different terminology (e.g. "60mm visible profile" = Face Width of Mullion).
 
 PARAMETERS:
@@ -375,12 +410,12 @@ DOCUMENT TEXT:
 {context}
 
 RULES:
-- found=true if ANY relevant data exists: explicit, partial, implied, derivable, or equivalent terminology
-- found=false ONLY when the document has absolutely NO information about this parameter
+- found=true if ANY relevant data exists in ANY document: explicit, partial, implied, derivable, or equivalent terminology
+- found=false ONLY when NO document has ANY information about this parameter
 - When uncertain between found and not-found → choose found=true with confidence 0.5-0.6 (let the user decide)
 - value: concise string with key sub-values
 - confidence: 0.9+ explicit, 0.7-0.9 inferred/derived, 0.5-0.7 partial/implied
-- source_numbers: list of source numbers [1,2,...] with relevant info
+- source_numbers: list of source numbers [1,2,...] with relevant info — can span multiple documents
 - explanation: MAX 15 words — keep very brief to avoid response truncation
 - EVERY parameter MUST appear in output
 
