@@ -353,7 +353,7 @@ Return ONLY valid JSON — one key per parameter:
         windows = self._build_context_windows(parent_dicts)
         logger.info(
             f"[FULL_CONTEXT] Split into {len(windows)} context windows "
-            f"(~{FULL_CONTEXT_WINDOW_TOKENS:,} tokens each, {FULL_CONTEXT_OVERLAP} overlap)"
+            f"(~{self.context_window_tokens:,} tokens each, {FULL_CONTEXT_OVERLAP} overlap)"
         )
 
         # ── Fire LLM calls for all windows in parallel ──
