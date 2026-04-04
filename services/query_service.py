@@ -5,7 +5,8 @@ import anthropic
 from fastapi import HTTPException
 from sqlalchemy.orm import Session, joinedload
 
-from core.clients import pinecone_index, embedding_client, anthropic_client
+from config.models import get_model_config, DEFAULT_MODEL
+from core.clients import pinecone_index, embedding_client, anthropic_client, gemini_client
 from models.document_chunk import DocumentChunk
 from models.query_log import QueryLog
 
@@ -32,7 +33,7 @@ Rules:
 - Use the conversation history to understand follow-up questions in context"""
 
 
-def process_query(project_id: uuid.UUID, query: str, db: Session) -> dict:
+def process_query(project_id: uuid.UUID, query: str, db: Session, model_key: str = None) -> dict:
     """Execute an ad-hoc query against project documents and return answer + sources."""
 
     # ── Embed query (with error handling) ────────────────────────────────────
@@ -119,40 +120,51 @@ def process_query(project_id: uuid.UUID, query: str, db: Session) -> dict:
         ) + "\n\n"
 
     # ── LLM call (with timeout and error handling) ───────────────────────────
-    if anthropic_client is None:
-        raise HTTPException(
-            status_code=503,
-            detail="AI service not initialized. Check server logs.",
-        )
-    try:
-        response = anthropic_client.messages.create(
-            model="claude-opus-4-20250514",
-            max_tokens=2048,
-            temperature=0.3,
-            timeout=60.0,  # prevent indefinite hang
-            system=QUERY_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": f"{chat_history}Question: {query}\n\nDocument Context:\n{context}"}],
-        )
-    except anthropic.APITimeoutError:
-        logger.warning(f"[QUERY] Anthropic timed out for project {project_id}")
-        raise HTTPException(
-            status_code=504,
-            detail="AI response timed out. Try a shorter or simpler question.",
-        )
-    except anthropic.RateLimitError:
-        logger.warning(f"[QUERY] Anthropic rate limited for project {project_id}")
-        raise HTTPException(
-            status_code=429,
-            detail="AI service is rate limited. Please wait a moment and try again.",
-        )
-    except anthropic.APIError as e:
-        logger.error(f"[QUERY] Anthropic API error: {e}")
-        raise HTTPException(
-            status_code=502,
-            detail=f"AI service error: {e}",
-        )
+    model_cfg = get_model_config(model_key or DEFAULT_MODEL)
+    provider = model_cfg["provider"]
+    model_id = model_cfg["model_id"]
+    user_content = f"{chat_history}Question: {query}\n\nDocument Context:\n{context}"
 
-    answer = response.content[0].text
+    if provider == "google":
+        if gemini_client is None:
+            raise HTTPException(status_code=503, detail="Google AI not initialized.")
+        try:
+            from google import genai
+            full_prompt = f"{QUERY_SYSTEM_PROMPT}\n\n{user_content}"
+            resp = gemini_client.models.generate_content(
+                model=model_id,
+                contents=full_prompt,
+                config=genai.types.GenerateContentConfig(
+                    temperature=0.3,
+                    max_output_tokens=2048,
+                ),
+            )
+            answer = resp.text
+        except Exception as e:
+            logger.error(f"[QUERY] Gemini error: {e}")
+            raise HTTPException(status_code=502, detail=f"AI service error: {e}")
+    else:
+        if anthropic_client is None:
+            raise HTTPException(status_code=503, detail="AI service not initialized.")
+        try:
+            response = anthropic_client.messages.create(
+                model=model_id,
+                max_tokens=2048,
+                temperature=0.3,
+                timeout=60.0,
+                system=QUERY_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": user_content}],
+            )
+            answer = response.content[0].text
+        except anthropic.APITimeoutError:
+            logger.warning(f"[QUERY] LLM timed out for project {project_id}")
+            raise HTTPException(status_code=504, detail="AI response timed out. Try a shorter question.")
+        except anthropic.RateLimitError:
+            logger.warning(f"[QUERY] LLM rate limited for project {project_id}")
+            raise HTTPException(status_code=429, detail="AI service rate limited. Wait a moment and retry.")
+        except anthropic.APIError as e:
+            logger.error(f"[QUERY] LLM API error: {e}")
+            raise HTTPException(status_code=502, detail=f"AI service error: {e}")
 
     sources = [
         {

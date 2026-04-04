@@ -1,8 +1,10 @@
 import uuid
+from typing import Optional
 
 from fastapi import APIRouter, Form, HTTPException, Depends
 from sqlalchemy.orm import Session
 
+from config.models import AVAILABLE_MODELS
 from core.database import get_db
 from models.project import Project
 from models.query_log import QueryLog
@@ -12,13 +14,19 @@ router = APIRouter(prefix="", tags=["query"])
 
 
 @router.post("/projects/{project_id}/query")
-async def adhoc_query(project_id: uuid.UUID, query: str = Form(...), db: Session = Depends(get_db)):
+async def adhoc_query(
+    project_id: uuid.UUID,
+    query: str = Form(...),
+    model: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+):
     # Verify project exists
     project = db.query(Project).filter(Project.project_id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    return process_query(project_id, query, db)
+    model_key = model if model and model in AVAILABLE_MODELS else None
+    return process_query(project_id, query, db, model_key=model_key)
 
 
 @router.get("/projects/{project_id}/chat-history")
