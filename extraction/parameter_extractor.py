@@ -258,19 +258,23 @@ class ParameterExtractor:
     # ══════════════════════════════════════════════════════════════════════════
 
     def _fetch_all_parent_chunks(self, project_id: str) -> List[Dict]:
-        """Fetch ALL parent chunks for a project from ALL document types.
+        """Fetch ALL level-0 parent chunks for a project from ALL document types.
 
-        Combines:
-        - Level-0 parent chunks from spec/drawing PDFs (full section text)
-        - Level-1 chunks from BOQ/spreadsheets (no parent hierarchy)
-        - Fallback to level-1 children if no level-0 parents exist
+        Level-0 parents are created for:
+        - PDF specs/drawings: full section text (~3000 words each)
+        - BOQ spreadsheets: consolidated per-sheet text (equal weight to spec sections)
+        - DOCX specs: full section text
 
-        This ensures ALL document types contribute to full-context extraction.
+        If no level-0 parents exist (legacy data), falls back to level-1 children.
+
+        Returns chunks interleaved by document to ensure all document types
+        get fair representation across context windows (no document is bunched
+        at the end where it might be ignored).
         """
         from models.document import Document
 
-        # 1. Fetch level-0 parents (specs, drawings, docx)
-        spec_parents = (
+        # 1. Fetch ALL level-0 parents (specs, drawings, docx, BOQ — all have them now)
+        all_parents = (
             self.db.query(DocumentChunk)
             .options(joinedload(DocumentChunk.document))
             .filter(
@@ -281,10 +285,10 @@ class ParameterExtractor:
             .all()
         )
 
-        if not spec_parents:
+        if not all_parents:
             # Fallback: if no level-0 parents exist (legacy data), fetch all level-1 children
             logger.warning(f"[FULL_CONTEXT] No level-0 parents found — falling back to level-1 children")
-            spec_parents = (
+            all_parents = (
                 self.db.query(DocumentChunk)
                 .options(joinedload(DocumentChunk.document))
                 .filter(
@@ -294,45 +298,40 @@ class ParameterExtractor:
                 .order_by(DocumentChunk.document_id, DocumentChunk.page_number)
                 .all()
             )
-            # In fallback mode, BOQ chunks are already included (all are level-1)
-            return [self._chunk_to_dict(p, score=1.0) for p in spec_parents]
+            return [self._chunk_to_dict(p, score=1.0) for p in all_parents]
 
-        # 2. Fetch BOQ/spreadsheet chunks (these have no level-0 parents)
-        boq_doc_ids = (
-            self.db.query(Document.document_id)
-            .filter(
-                Document.project_id == project_id,
-                Document.file_type.in_(["excel_boq", "csv_boq"]),
-            )
-            .all()
-        )
-        boq_doc_ids = [d[0] for d in boq_doc_ids]
+        # 2. Interleave chunks from different documents for balanced representation.
+        #    Without interleaving, BOQ parents (appended last) end up in the final
+        #    context window and can be ignored by the LLM.
+        from collections import defaultdict
+        doc_groups = defaultdict(list)
+        for chunk in all_parents:
+            doc_id = str(chunk.document_id)
+            doc_groups[doc_id].append(chunk)
 
-        boq_chunks = []
-        if boq_doc_ids:
-            boq_chunks = (
-                self.db.query(DocumentChunk)
-                .options(joinedload(DocumentChunk.document))
-                .filter(
-                    DocumentChunk.project_id == project_id,
-                    DocumentChunk.document_id.in_(boq_doc_ids),
-                )
-                .order_by(DocumentChunk.document_id, DocumentChunk.chunk_index)
-                .all()
-            )
-            logger.info(f"[FULL_CONTEXT] Including {len(boq_chunks)} BOQ chunks from {len(boq_doc_ids)} spreadsheet(s)")
+        interleaved = []
+        group_lists = list(doc_groups.values())
+        max_len = max(len(g) for g in group_lists) if group_lists else 0
 
-        # 3. Combine: spec parents first, then BOQ chunks
-        all_chunks = spec_parents + boq_chunks
+        for i in range(max_len):
+            for group in group_lists:
+                if i < len(group):
+                    interleaved.append(group[i])
 
         # Log document coverage
         doc_types = {}
-        for c in all_chunks:
+        doc_names = {}
+        for c in interleaved:
             ft = c.document.file_type if c.document else "unknown"
+            fn = c.document.original_filename if c.document else "unknown"
             doc_types[ft] = doc_types.get(ft, 0) + 1
-        logger.info(f"[FULL_CONTEXT] Document coverage: {doc_types}")
+            doc_names[fn] = doc_names.get(fn, 0) + 1
+        logger.info(
+            f"[FULL_CONTEXT] {len(interleaved)} parent chunks from {len(doc_groups)} documents. "
+            f"Types: {doc_types} | Files: {doc_names}"
+        )
 
-        return [self._chunk_to_dict(p, score=1.0) for p in all_chunks]
+        return [self._chunk_to_dict(p, score=1.0) for p in interleaved]
 
     @staticmethod
     def _estimate_tokens(text: str) -> int:

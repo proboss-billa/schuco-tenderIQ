@@ -859,8 +859,12 @@ class DocumentProcessor:
         """Process spreadsheet BOQ — store structured items in PostgreSQL and
         embed both structured items AND raw text chunks into Pinecone.
 
-        The parser always produces text_chunks (raw row-level text from every
-        sheet) so even non-standard layouts get indexed for LLM retrieval.
+        Creates a TWO-LEVEL chunk hierarchy matching spec documents:
+        - Level-0 parents: consolidated per-sheet text (used by full-context Pass 1)
+        - Level-1 children: individual items/rows (embedded in Pinecone for Pass 2)
+
+        This ensures BOQ data has equal weight to spec sections during extraction,
+        instead of being drowned out by larger spec parent chunks.
         """
         doc_name = document.original_filename
         t_doc_start = time.perf_counter()
@@ -893,7 +897,7 @@ class DocumentProcessor:
                 continue
 
         # ── Step 3: Build texts for embedding ────────────────────────────────
-        # 3a. Structured item texts
+        # 3a. Structured item texts (individual rows)
         item_texts = []
         for item in valid_items:
             parts = []
@@ -921,33 +925,104 @@ class DocumentProcessor:
             self.db.commit()
             return
 
-        # ── Step 4: Embed everything ─────────────────────────────────────────
+        # ── Step 4: Create level-0 parent chunks (consolidated per sheet) ────
+        # These give BOQ data equal weight to spec sections in full-context Pass 1.
+        # Without parents, 30 tiny child chunks (~75 words each ≈ 3K tokens)
+        # get drowned out by spec parents (~3000 words each ≈ 120K+ tokens).
+        chunk_index = 0
+        parent_ids = {}  # sheet_name → parent_chunk_id
+
+        # Group text chunks by sheet name for parent creation
+        sheet_texts: dict = {}  # sheet_name → [text, text, ...]
+        for text in text_chunks:
+            sheet_name = "BOQ"
+            first_line = text.split("\n", 1)[0] if text else ""
+            if first_line.startswith("Sheet:"):
+                sheet_name = first_line.replace("Sheet:", "").strip() or "BOQ"
+            if sheet_name not in sheet_texts:
+                sheet_texts[sheet_name] = []
+            sheet_texts[sheet_name].append(text)
+
+        # Also group structured items by category/sheet
+        if item_texts:
+            cat_name = "BOQ Items"
+            if valid_items and valid_items[0].get("category"):
+                cat_name = f"BOQ - {valid_items[0]['category']}"
+            if cat_name not in sheet_texts:
+                sheet_texts[cat_name] = []
+            # Prepend structured items to the first group
+            sheet_texts[cat_name] = item_texts + sheet_texts.get(cat_name, [])
+
+        for sheet_name, texts in sheet_texts.items():
+            # Consolidate all text for this sheet into one level-0 parent
+            parent_text = f"=== BOQ: {sheet_name} ({doc_name}) ===\n\n" + "\n\n".join(texts)
+
+            # Cap parent at PARENT_MAX_WORDS to match spec parent sizing
+            parent_words = parent_text.split()
+            if len(parent_words) > PARENT_MAX_WORDS:
+                parent_text = " ".join(parent_words[:PARENT_MAX_WORDS])
+
+            parent_id = uuid.uuid4()
+            parent_ids[sheet_name] = parent_id
+
+            parent_chunk = DocumentChunk(
+                chunk_id=parent_id,
+                document_id=document.document_id,
+                project_id=self.project_id,
+                chunk_index=chunk_index,
+                chunk_level=0,           # ← Level-0 parent: visible to full-context Pass 1
+                chunk_text=parent_text,
+                page_number=None,
+                section_title=f"BOQ: {sheet_name}",
+                subsection_title=None,
+                pinecone_id=None,        # ← NOT in Pinecone (same as spec parents)
+            )
+            self.db.add(parent_chunk)
+            chunk_index += 1
+
+        logger.info(
+            f"[BOQ] {doc_name}: created {len(parent_ids)} level-0 parent(s) "
+            f"for full-context extraction"
+        )
+
+        # ── Step 5: Embed child texts (level-1) ─────────────────────────────
         t0 = time.perf_counter()
         embeddings = self._generate_embeddings(all_texts)
         logger.info(f"[TIMING][BOQ_EMBED] {doc_name}: {time.perf_counter() - t0:.2f}s ({len(all_texts)} texts)")
 
-        # ── Step 5: Store chunks + upsert to Pinecone ────────────────────────
+        # ── Step 6: Store level-1 child chunks + upsert to Pinecone ──────────
+        # Find parent for each child text based on sheet grouping
         pinecone_vectors = []
-        for chunk_index, (text, embedding) in enumerate(zip(all_texts, embeddings)):
-            is_structured = chunk_index < len(item_texts)
-            vector_id = f"{document.document_id}_boq_{chunk_index}"
+        for child_idx, (text, embedding) in enumerate(zip(all_texts, embeddings)):
+            is_structured = child_idx < len(item_texts)
+            vector_id = f"{document.document_id}_boq_{child_idx}"
 
-            # Section title from structured item, or sheet name from text chunk
+            # Determine section and parent
             section = ""
             subsection = ""
-            if is_structured and chunk_index < len(valid_items):
-                section = valid_items[chunk_index].get("category") or ""
-                subsection = valid_items[chunk_index].get("sub_category") or ""
-            elif not is_structured:
-                # Text chunks start with "Sheet: <name>\n"
+            parent_chunk_id = None
+
+            if is_structured and child_idx < len(valid_items):
+                section = valid_items[child_idx].get("category") or ""
+                subsection = valid_items[child_idx].get("sub_category") or ""
+                # Find matching parent
+                cat_name = "BOQ Items"
+                if section:
+                    cat_name = f"BOQ - {section}"
+                parent_chunk_id = parent_ids.get(cat_name) or parent_ids.get("BOQ Items")
+            else:
+                # Text chunks — find sheet name
                 first_line = text.split("\n", 1)[0] if text else ""
                 if first_line.startswith("Sheet:"):
                     section = first_line.replace("Sheet:", "").strip()
+                parent_chunk_id = parent_ids.get(section) or parent_ids.get("BOQ")
 
             db_chunk = DocumentChunk(
                 document_id=document.document_id,
                 project_id=self.project_id,
                 chunk_index=chunk_index,
+                chunk_level=1,           # ← Level-1 child: indexed in Pinecone for vector search
+                parent_chunk_id=parent_chunk_id,
                 chunk_text=text,
                 page_number=None,
                 section_title=section or None,
@@ -955,6 +1030,7 @@ class DocumentProcessor:
                 pinecone_id=vector_id,
             )
             self.db.add(db_chunk)
+            chunk_index += 1
 
             pinecone_vectors.append({
                 "id": vector_id,
@@ -988,6 +1064,9 @@ class DocumentProcessor:
         logger.info(f"[TIMING][BOQ_PINECONE] {doc_name}: {time.perf_counter() - t0:.2f}s ({len(pinecone_vectors)} vectors)")
 
         document.processed = True
-        document.num_chunks = len(all_texts)
+        document.num_chunks = len(all_texts) + len(parent_ids)
         self.db.commit()
-        logger.info(f"[TIMING][BOQ_TOTAL] {doc_name}: {time.perf_counter() - t_doc_start:.2f}s ({len(all_texts)} chunks)")
+        logger.info(
+            f"[TIMING][BOQ_TOTAL] {doc_name}: {time.perf_counter() - t_doc_start:.2f}s "
+            f"({len(parent_ids)} parents + {len(all_texts)} children = {len(all_texts) + len(parent_ids)} chunks)"
+        )
