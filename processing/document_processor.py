@@ -733,16 +733,38 @@ class DocumentProcessor:
         # ── Step 1: Parse ─────────────────────────────────────────────────────
         t0 = time.perf_counter()
         if document.file_type in ('pdf_spec', 'pdf_drawing'):
-            # pdf_drawing → always hybrid vision parser (skip char-count sampling).
-            # pdf_spec    → auto-detect via char count; vision used if drawing-heavy.
-            if document.file_type == 'pdf_drawing':
-                from parsing.drawing_pdf_parser import DrawingPDFParser
-                parser = DrawingPDFParser()
-                logger.info(f"[PARSE] {doc_name}: pdf_drawing → forced DrawingPDFParser")
-            else:
-                parser = self._choose_pdf_parser(document.file_path, document=document)
-            parsed_content, page_count = parser.parse_with_page_count(document.file_path)
+            # Always use hybrid parser — classifies EVERY page independently:
+            # text pages (≥100 chars) → standard text extraction
+            # drawing pages (<100 chars) → Gemini Vision
+            # This handles mixed PDFs (specs + drawings in one file).
+            from parsing.drawing_pdf_parser import DrawingPDFParser
+            parser = DrawingPDFParser()
+            parsed_content, page_count, parse_stats = parser.parse_with_page_count(document.file_path)
             document.page_count = page_count
+
+            # Reclassify file_type based on actual page content
+            vision_ratio = parse_stats["vision_pages"] / max(page_count, 1)
+            original_type = document.file_type
+            if vision_ratio > 0.5:
+                document.file_type = "pdf_drawing"
+            elif vision_ratio > 0.15:
+                document.file_type = "pdf_mixed"
+            else:
+                if document.file_type == "pdf_drawing":
+                    # Filename said drawing but content is mostly text
+                    document.file_type = "pdf_spec"
+
+            if document.file_type != original_type:
+                logger.info(
+                    f"[PARSE] {doc_name}: reclassified {original_type} → {document.file_type} "
+                    f"(text:{parse_stats['text_pages']} vision:{parse_stats['vision_pages']} "
+                    f"skipped:{parse_stats['skipped_pages']})"
+                )
+            else:
+                logger.info(
+                    f"[PARSE] {doc_name}: {document.file_type} confirmed "
+                    f"(text:{parse_stats['text_pages']} vision:{parse_stats['vision_pages']})"
+                )
         elif document.file_type in ('dxf_drawing', 'dwg_drawing'):
             from parsing.dxf_parser import DXFParser
             parsed_content = DXFParser().parse(document.file_path)

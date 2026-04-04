@@ -164,6 +164,8 @@ def get_document_role(filename: str, file_type: Optional[str] = None) -> str:
     if file_type:
         if file_type in ("pdf_drawing", "dxf_drawing", "dwg_drawing"):
             return "drawing"
+        if file_type == "pdf_mixed":
+            return "mixed (specs + drawings)"
         if file_type == "excel_boq":
             return "boq"
 

@@ -64,10 +64,10 @@ class DrawingPDFParser:
         self.gemini = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
     def parse(self, pdf_path: str) -> List[Dict]:
-        blocks, _ = self.parse_with_page_count(pdf_path)
+        blocks, _, _ = self.parse_with_page_count(pdf_path)
         return blocks
 
-    def parse_with_page_count(self, pdf_path: str) -> Tuple[List[Dict], int]:
+    def parse_with_page_count(self, pdf_path: str) -> Tuple[List[Dict], int, Dict]:
         blocks: List[Dict] = []
         current_section: str | None = None
         current_subsection: str | None = None
@@ -175,11 +175,16 @@ class DrawingPDFParser:
                 f"[DRAWING_PDF] {vision_skipped} drawing page(s) skipped — cap of {MAX_VISION_PAGES} reached. "
                 f"Raise MAX_VISION_PAGES in drawing_pdf_parser.py to process all pages."
             )
+        stats = {
+            "text_pages": len(text_page_indices),
+            "vision_pages": len(vision_page_indices),
+            "skipped_pages": vision_skipped,
+        }
         logger.info(
             f"[DRAWING_PDF] Done: {len(blocks)} blocks from {total_pages} pages "
-            f"({vision_count} via vision, {vision_skipped} skipped)"
+            f"({stats['text_pages']} text, {stats['vision_pages']} vision, {vision_skipped} skipped)"
         )
-        return blocks, total_pages
+        return blocks, total_pages, stats
 
     @retry(
         retry=retry_if_exception_type(Exception),
