@@ -448,8 +448,10 @@ async def _run_pipeline_inner(project_id: uuid.UUID):
             Document.processed == False,
         ).all()
 
-        spec_docs = [d for d in all_docs if d.file_type in ['pdf_spec', 'docx_spec', 'dxf_drawing', 'dwg_drawing']]
+        spec_docs = [d for d in all_docs if d.file_type in ['pdf_spec', 'docx_spec', 'dxf_drawing', 'dwg_drawing', 'pdf_drawing']]
         boq_docs  = [d for d in all_docs if d.file_type == 'excel_boq']
+        # Process non-drawing specs first (fast), then heavy drawing PDFs last
+        spec_docs.sort(key=lambda d: (1 if d.file_type == 'pdf_drawing' else 0, d.original_filename))
         total_spec = len(spec_docs)
         _pipeline_log.info(
             f"[PIPELINE] {len(spec_docs)} spec docs, {len(boq_docs)} BOQ docs"
@@ -850,6 +852,134 @@ async def re_extract_single_parameter(
     }
 
 
+@app.post("/projects/{project_id}/documents/{document_id}/reprocess", status_code=202)
+async def reprocess_document(
+    project_id: uuid.UUID,
+    document_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """Re-process a single document: re-parse, re-embed, re-index, then re-extract parameters."""
+    project = db.query(Project).filter(Project.project_id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    doc = db.query(Document).filter(
+        Document.document_id == document_id,
+        Document.project_id == project_id,
+    ).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    async def _run_doc_reprocess(pid: uuid.UUID, did: uuid.UUID):
+        _timing_project_id.set(str(pid))
+        _pipeline_log.info(f"[REPROCESS-DOC] Starting for document {did}")
+        _db = SessionLocal()
+        try:
+            _proj = _db.query(Project).filter(Project.project_id == pid).first()
+            _doc = _db.query(Document).filter(Document.document_id == did).first()
+            if not _doc:
+                return
+
+            _doc.processing_status = "processing"
+            _doc.processing_error = None
+            if _proj:
+                _proj.processing_status = "processing"
+                _proj.pipeline_step = f"Re-processing: {_doc.original_filename}"
+            _db.commit()
+
+            # Delete old chunks for this document from DB and Pinecone
+            old_chunks = _db.query(DocumentChunk).filter(
+                DocumentChunk.document_id == did
+            ).all()
+            old_pinecone_ids = [c.pinecone_id for c in old_chunks if c.pinecone_id]
+            if old_pinecone_ids:
+                BATCH = 100
+                for i in range(0, len(old_pinecone_ids), BATCH):
+                    try:
+                        pinecone_index.delete(ids=old_pinecone_ids[i:i+BATCH])
+                    except Exception:
+                        pass
+            for c in old_chunks:
+                _db.delete(c)
+            _db.commit()
+
+            # Re-process based on file type
+            if _doc.file_type == 'excel_boq':
+                processor = DocumentProcessor(
+                    project_id=pid, db_session=_db,
+                    pinecone_index=pinecone_index, embedding_client=embedding_client,
+                )
+                processor._process_boq_document(_doc)
+            else:
+                doc_processor = DocumentProcessor(
+                    project_id=pid, db_session=_db,
+                    pinecone_index=pinecone_index, embedding_client=embedding_client,
+                )
+                doc_processor._process_specification_document(_doc)
+
+            _doc.processing_status = "completed"
+            _doc.processed = True
+            _db.commit()
+
+            # Wait for Pinecone indexing
+            await _wait_for_pinecone_doc(str(pid), str(did), timeout=120)
+
+            # Re-extract parameters
+            p_type = _proj.project_type if _proj else "commercial"
+            filtered_params = [
+                p for p in FACADE_PARAMETERS
+                if p.get("project_type", "both") in ("both", p_type)
+            ]
+            if _proj:
+                _proj.pipeline_step = f"Re-extracting {len(filtered_params)} parameters..."
+                _db.commit()
+
+            doc_count = _db.query(Document).filter(
+                Document.project_id == pid, Document.processed == True,
+            ).count()
+            extractor = ParameterExtractor(
+                pinecone_index=pinecone_index, embedding_client=embedding_client,
+                db_session=_db, session_factory=SessionLocal,
+            )
+            await extractor.extract_all_parameters_async(
+                str(pid), facade_parameters=filtered_params,
+                max_concurrent=5, num_docs=max(1, doc_count),
+            )
+
+            if _proj:
+                _proj.processing_status = "completed"
+                _proj.pipeline_step = None
+                _db.commit()
+            _pipeline_log.info(f"[REPROCESS-DOC] Completed for document {did}")
+
+        except Exception as e:
+            import traceback as _tb
+            _tb.print_exc()
+            _pipeline_log.error(f"[REPROCESS-DOC] FAILED for document {did}: {e}")
+            try:
+                _doc = _db.query(Document).filter(Document.document_id == did).first()
+                if _doc:
+                    _doc.processing_status = "failed"
+                    _doc.processing_error = str(e)[:1000]
+                _proj = _db.query(Project).filter(Project.project_id == pid).first()
+                if _proj:
+                    _proj.processing_status = "completed"
+                    _proj.pipeline_step = None
+                _db.commit()
+            except Exception:
+                pass
+        finally:
+            _db.close()
+
+    background_tasks.add_task(_run_doc_reprocess, project_id, document_id)
+    return {
+        "project_id": str(project_id),
+        "document_id": str(document_id),
+        "status": "reprocessing",
+        "message": f"Re-processing '{doc.original_filename}' started.",
+    }
+
+
 @app.get("/projects/{project_id}/parameters")
 async def get_extracted_parameters(project_id: uuid.UUID, db: Session = Depends(get_db)):
     project = db.query(Project).filter(Project.project_id == project_id).first()
@@ -928,6 +1058,7 @@ async def get_extracted_parameters(project_id: uuid.UUID, db: Session = Depends(
             "filename": d.original_filename,
             "file_type": d.file_type,
             "processing_status": getattr(d, 'processing_status', 'completed'),
+            "processing_error": getattr(d, 'processing_error', None),
             "page_count": getattr(d, 'page_count', None),
             "num_chunks": d.num_chunks,
         }
