@@ -1,6 +1,7 @@
 # processing/document_processor.py
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import time
 from typing import List, Dict, Any
@@ -320,26 +321,46 @@ class DocumentProcessor:
     def _generate_embeddings(self, texts: List[str]) -> List[List[float]]:
         """
         Call the embedding client in batches to avoid hitting API size limits.
-        Assumes self.embedder exposes:
-            embedder.embed(texts: List[str]) -> List[List[float]]
-        Each batch is retried up to 3× with exponential backoff on any error.
+        Uses parallel threads for 3+ batches to speed up large documents.
         """
-        all_embeddings: List[List[float]] = []
+        EMBED_WORKERS = 3
         t0 = time.perf_counter()
 
-        for batch_num, start in enumerate(range(0, len(texts), EMBED_BATCH_SIZE), 1):
-            batch = texts[start: start + EMBED_BATCH_SIZE]
-            bt = time.perf_counter()
-            batch_embeddings = self._embed_with_retry(batch)
-            logger.info(
-                f"[TIMING][EMBED] batch {batch_num} ({len(batch)} texts): "
-                f"{time.perf_counter() - bt:.2f}s"
-            )
-            all_embeddings.extend(batch_embeddings)
+        batches = []
+        for start in range(0, len(texts), EMBED_BATCH_SIZE):
+            batches.append(texts[start: start + EMBED_BATCH_SIZE])
+
+        if len(batches) <= 2:
+            # Few batches — sequential is fine, avoid thread overhead
+            all_embeddings: List[List[float]] = []
+            for batch_num, batch in enumerate(batches, 1):
+                bt = time.perf_counter()
+                batch_embeddings = self._embed_with_retry(batch)
+                logger.info(
+                    f"[TIMING][EMBED] batch {batch_num} ({len(batch)} texts): "
+                    f"{time.perf_counter() - bt:.2f}s"
+                )
+                all_embeddings.extend(batch_embeddings)
+        else:
+            # Multiple batches — parallelize
+            ordered_results: List[List[List[float]] | None] = [None] * len(batches)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=EMBED_WORKERS) as executor:
+                future_to_idx = {
+                    executor.submit(self._embed_with_retry, batch): i
+                    for i, batch in enumerate(batches)
+                }
+                for future in concurrent.futures.as_completed(future_to_idx):
+                    idx = future_to_idx[future]
+                    ordered_results[idx] = future.result()
+
+            all_embeddings = []
+            for batch_result in ordered_results:
+                all_embeddings.extend(batch_result)
 
         logger.info(
             f"[TIMING][EMBED] total {len(texts)} texts in "
-            f"{len(all_embeddings)} embeddings: {time.perf_counter() - t0:.2f}s"
+            f"{len(all_embeddings)} embeddings ({len(batches)} batches): "
+            f"{time.perf_counter() - t0:.2f}s"
         )
         return all_embeddings
 

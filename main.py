@@ -490,93 +490,101 @@ async def _run_pipeline_inner(project_id: uuid.UUID):
                 doc.processing_error = str(e)[:1000]
             db.commit()
 
-        # ── Phase 1: Parse all spec docs; Pinecone waits run concurrently ───────
-        # Parse steps remain sequential — they share the 'db' session (not thread-safe).
-        # After each parse succeeds, a concurrent asyncio.Task watches Pinecone for
-        # that document's vectors. All watch-tasks overlap with subsequent parses.
-        # Total Phase-1 wall time:
-        #   (sum of parse times) + (longest single Pinecone wait)
-        # vs old sequential: sum of (parse_time + pinecone_wait) per doc.
-        # At 20 docs × 15s parse + 90s wait: ~510s vs ~2100s.
+        # ── Phase 1: Parse all spec docs in PARALLEL ─────────────────────────
+        # Each document gets its own DB session — no shared-state conflicts.
+        # Up to DOC_CONCURRENCY docs processed simultaneously; text specs
+        # (fast) finish quickly while heavy drawing PDFs run in parallel.
+        DOC_CONCURRENCY = 3
+        _doc_semaphore = asyncio.Semaphore(DOC_CONCURRENCY)
+        _progress_lock = asyncio.Lock()      # serialise pipeline_step updates
+        _completed_count = [0]               # mutable counter for progress
+
         indexed_spec_count = 0
-        indexed_docs    = []   # successfully indexed docs (for status update later)
-        pinecone_wait_tasks = []  # concurrent asyncio.Tasks — one per indexed doc
+        indexed_docs    = []
+        pinecone_wait_tasks = []
 
-        for i, doc in enumerate(spec_docs, 1):
+        async def _process_one_spec(doc, idx):
+            """Process a single spec document, return (doc, success, wait_task|None)."""
+            async with _doc_semaphore:
+                doc_id   = doc.document_id
+                doc_name = doc.original_filename
 
-            # ── A: Parse + chunk + embed ────────────────────────────────────────
-            # Each document gets its OWN DB session so that a failure (e.g.
-            # UniqueViolation → PendingRollbackError) in one document never
-            # poisons the session used by subsequent documents.
-            doc_id = doc.document_id
-            doc_name = doc.original_filename
-            is_drawing = doc.file_type == "pdf_drawing"
+                async with _progress_lock:
+                    project.pipeline_step = (
+                        f"Processing documents ({idx}/{total_spec})…"
+                    )
+                    db.commit()
 
-            # Update progress on the shared project session
-            if is_drawing:
-                project.pipeline_step = f"Analysing drawing sheets in {doc_name} with Vision AI ({i}/{total_spec})…"
-            else:
-                project.pipeline_step = f"Parsing specification: {doc_name} ({i}/{total_spec})…"
-            db.commit()
-
-            t_doc = _time.perf_counter()
-            doc_session = SessionLocal()
-            try:
-                doc_local = doc_session.query(Document).filter(
-                    Document.document_id == doc_id
-                ).first()
-                doc_local.processing_status = "processing"
-                doc_session.commit()
-
-                # Build a per-document processor with its own session
-                doc_processor = DocumentProcessor(
-                    project_id=project_id,
-                    db_session=doc_session,
-                    pinecone_index=pinecone_index,
-                    embedding_client=embedding_client,
-                )
-
-                # Run synchronous I/O-heavy parse+embed in a thread executor so
-                # the async event loop remains unblocked.
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(
-                    None, doc_processor._process_specification_document, doc_local
-                )
-
-                doc_local.processing_status = "indexed"
-                doc_session.commit()
-                indexed_spec_count += 1
-                indexed_docs.append(doc)
-                _pipeline_log.info(
-                    f"[TIMING][PIPELINE] Parse+embed {doc_name} "
-                    f"({i}/{total_spec}): {_time.perf_counter() - t_doc:.2f}s"
-                )
-            except Exception as e:
-                _pipeline_log.error(f"[PIPELINE] Parse failed {doc_name}: {e}")
+                t_doc = _time.perf_counter()
+                doc_session = SessionLocal()
                 try:
-                    doc_session.rollback()
                     doc_local = doc_session.query(Document).filter(
                         Document.document_id == doc_id
                     ).first()
-                    if doc_local:
-                        doc_local.processing_status = "failed"
-                        doc_local.processing_error = str(e)[:1000]
-                        doc_session.commit()
-                except Exception:
-                    pass
-                continue  # skip this doc, continue to next
-            finally:
-                doc_session.close()
+                    doc_local.processing_status = "processing"
+                    doc_session.commit()
 
-            # ── B: Fire Pinecone wait as a concurrent Task ────────────────────
-            # _wait_for_pinecone_doc is purely async (asyncio.sleep + HTTP poll)
-            # and does NOT touch any DB session — safe to overlap.
-            project.pipeline_step = f"Vectorising {doc_name} into knowledge base ({i}/{total_spec})…"
-            db.commit()
-            wait_task = asyncio.create_task(
-                _wait_for_pinecone_doc(str(project_id), str(doc_id), timeout=180)
-            )
-            pinecone_wait_tasks.append(wait_task)
+                    doc_processor = DocumentProcessor(
+                        project_id=project_id,
+                        db_session=doc_session,
+                        pinecone_index=pinecone_index,
+                        embedding_client=embedding_client,
+                    )
+
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(
+                        None, doc_processor._process_specification_document, doc_local
+                    )
+
+                    doc_local.processing_status = "indexed"
+                    doc_session.commit()
+
+                    _completed_count[0] += 1
+                    _pipeline_log.info(
+                        f"[TIMING][PIPELINE] Parse+embed {doc_name} "
+                        f"({_completed_count[0]}/{total_spec}): "
+                        f"{_time.perf_counter() - t_doc:.2f}s"
+                    )
+
+                    wait_task = asyncio.create_task(
+                        _wait_for_pinecone_doc(str(project_id), str(doc_id), timeout=180)
+                    )
+                    return (doc, True, wait_task)
+
+                except Exception as e:
+                    _pipeline_log.error(f"[PIPELINE] Parse failed {doc_name}: {e}")
+                    try:
+                        doc_session.rollback()
+                        doc_local = doc_session.query(Document).filter(
+                            Document.document_id == doc_id
+                        ).first()
+                        if doc_local:
+                            doc_local.processing_status = "failed"
+                            doc_local.processing_error = str(e)[:1000]
+                            doc_session.commit()
+                    except Exception:
+                        pass
+                    return (doc, False, None)
+                finally:
+                    doc_session.close()
+
+        # Launch all spec docs concurrently (semaphore limits to DOC_CONCURRENCY)
+        spec_tasks = [
+            _process_one_spec(doc, i)
+            for i, doc in enumerate(spec_docs, 1)
+        ]
+        spec_results = await asyncio.gather(*spec_tasks, return_exceptions=True)
+
+        for result in spec_results:
+            if isinstance(result, Exception):
+                _pipeline_log.error(f"[PIPELINE] Unexpected task error: {result}")
+                continue
+            doc, success, wait_task = result
+            if success:
+                indexed_spec_count += 1
+                indexed_docs.append(doc)
+                if wait_task:
+                    pinecone_wait_tasks.append(wait_task)
 
         # ── Synchronization barrier: all Pinecone tasks must complete ─────────
         all_pinecone_tasks = pinecone_wait_tasks + boq_pinecone_tasks
