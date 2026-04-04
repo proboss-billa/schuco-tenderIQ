@@ -463,6 +463,7 @@ async def _run_pipeline_inner(project_id: uuid.UUID):
         )
 
         # ── Process BOQ documents (no LLM extraction needed) ─────────────────
+        boq_pinecone_tasks = []
         for doc in boq_docs:
             project.pipeline_step = f"Processing BOQ: {doc.original_filename}"
             doc.processing_status = "processing"
@@ -474,6 +475,12 @@ async def _run_pipeline_inner(project_id: uuid.UUID):
                 _pipeline_log.info(
                     f"[TIMING][PIPELINE] BOQ {doc.original_filename}: "
                     f"{_time.perf_counter() - t_boq:.2f}s"
+                )
+                # Fire Pinecone wait so BOQ vectors are ready for extraction
+                boq_pinecone_tasks.append(
+                    asyncio.create_task(
+                        _wait_for_pinecone_doc(str(project_id), str(doc.document_id), timeout=120)
+                    )
                 )
             except Exception as e:
                 _pipeline_log.error(f"[PIPELINE] BOQ failed {doc.original_filename}: {e}")
@@ -570,13 +577,14 @@ async def _run_pipeline_inner(project_id: uuid.UUID):
             pinecone_wait_tasks.append(wait_task)
 
         # ── Synchronization barrier: all Pinecone tasks must complete ─────────
-        if pinecone_wait_tasks:
+        all_pinecone_tasks = pinecone_wait_tasks + boq_pinecone_tasks
+        if all_pinecone_tasks:
             project.pipeline_step = (
-                f"Indexing {len(pinecone_wait_tasks)} document(s) into vector database…"
+                f"Indexing {len(all_pinecone_tasks)} document(s) into vector database…"
             )
             db.commit()
             t_wait_all = _time.perf_counter()
-            await asyncio.gather(*pinecone_wait_tasks)
+            await asyncio.gather(*all_pinecone_tasks)
             _pipeline_log.info(
                 f"[TIMING][PIPELINE] All Pinecone waits completed: "
                 f"{_time.perf_counter() - t_wait_all:.2f}s"
@@ -585,9 +593,12 @@ async def _run_pipeline_inner(project_id: uuid.UUID):
         # ── Phase 2: Extract ALL parameters ONCE after all docs are indexed ───
         # Running extraction once (not per-doc) reduces LLM calls by ~N× where
         # N is the number of spec documents, which is the main source of slowness.
-        if indexed_spec_count > 0:
+        # Run extraction if ANY documents were processed (spec OR BOQ) — BOQ
+        # chunks are in Pinecone and can answer BOQ-related parameters.
+        total_indexed = indexed_spec_count + len(boq_docs)
+        if total_indexed > 0:
             project.pipeline_step = (
-                f"Extracting {len(FACADE_PARAMETERS)} parameters across {indexed_spec_count} document(s)…"
+                f"Extracting {len(FACADE_PARAMETERS)} parameters across {total_indexed} document(s)…"
             )
             db.commit()
             db.expire_all()
@@ -603,16 +614,16 @@ async def _run_pipeline_inner(project_id: uuid.UUID):
                 str(project_id),
                 facade_parameters=FACADE_PARAMETERS,
                 max_concurrent=6,
-                num_docs=indexed_spec_count,
+                num_docs=total_indexed,
             )
             found_count = len([e for e in extractions if e.get("found")])
             _pipeline_log.info(
-                f"[TIMING][PIPELINE] Extraction (single pass, {indexed_spec_count} docs): "
+                f"[TIMING][PIPELINE] Extraction (single pass, {total_indexed} docs): "
                 f"{_time.perf_counter() - t_extract:.2f}s — "
                 f"{found_count}/{len(extractions)} params found"
             )
         else:
-            _pipeline_log.warning("[PIPELINE] No spec docs indexed — skipping extraction")
+            _pipeline_log.warning("[PIPELINE] No documents processed — skipping extraction")
 
         # Mark all successfully indexed docs as completed
         for doc in indexed_docs:
