@@ -79,7 +79,7 @@ class ParameterExtractor:
         from services.file_classifier import get_document_role
         doc_name = chunk.document.original_filename if chunk.document else None
         file_type = chunk.document.file_type if chunk.document else "unknown"
-        doc_role = get_document_role(doc_name) if doc_name else "unknown"
+        doc_role = get_document_role(doc_name, file_type=file_type) if doc_name else "unknown"
         return {
             'chunk_text':       chunk.chunk_text,
             'page_number':      chunk.page_number,

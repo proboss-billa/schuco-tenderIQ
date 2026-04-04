@@ -641,13 +641,17 @@ class DocumentProcessor:
 
         self._extract_all_parameters()
 
-    def _choose_pdf_parser(self, file_path: str):
+    def _choose_pdf_parser(self, file_path: str, document=None):
         """
         Sample the first 5 pages to decide between text-extraction and vision parsing.
 
         Drawing PDFs (CAD sheets rendered to PDF) have virtually no selectable
         text — PyMuPDF returns < MIN_TEXT_CHARS characters per page.
         Text-heavy specification documents have hundreds of chars per page.
+
+        If *document* is provided and content-detection overrides the filename
+        classification, the document's file_type is updated in-place so
+        downstream extraction sees the correct type.
         """
         import fitz as _fitz
         MIN_TEXT_CHARS = 100
@@ -664,6 +668,13 @@ class DocumentProcessor:
                 f"[AUTO-DETECT] {file_path}: avg {avg:.0f} chars/page "
                 f"→ DRAWING PDF — using Gemini Vision parser"
             )
+            # Reclassify: this is a drawing regardless of filename
+            if document and document.file_type != 'pdf_drawing':
+                logger.info(
+                    f"[AUTO-DETECT] Reclassifying '{document.original_filename}' "
+                    f"from {document.file_type} → pdf_drawing (content-based)"
+                )
+                document.file_type = 'pdf_drawing'
             from parsing.drawing_pdf_parser import DrawingPDFParser
             return DrawingPDFParser()
         else:
@@ -729,7 +740,7 @@ class DocumentProcessor:
                 parser = DrawingPDFParser()
                 logger.info(f"[PARSE] {doc_name}: pdf_drawing → forced DrawingPDFParser")
             else:
-                parser = self._choose_pdf_parser(document.file_path)
+                parser = self._choose_pdf_parser(document.file_path, document=document)
             parsed_content, page_count = parser.parse_with_page_count(document.file_path)
             document.page_count = page_count
         elif document.file_type in ('dxf_drawing', 'dwg_drawing'):

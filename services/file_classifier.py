@@ -148,23 +148,34 @@ def classify_content_type(filename: str, file_path: str) -> str:
     return base_type
 
 
-def get_document_role(filename: str) -> str:
-    """Infer the document's role/purpose from its filename.
+def get_document_role(filename: str, file_type: Optional[str] = None) -> str:
+    """Infer the document's role/purpose from its filename and/or DB file_type.
+
+    The *file_type* parameter (from the database) is the most reliable source
+    because it reflects content-based auto-detection (e.g., a PDF named
+    "1.pdf" that was reclassified to pdf_drawing after char-count sampling).
 
     Returns a human-readable role string used for logging and
-    context-building during extraction. This does NOT affect parsing —
-    it's metadata only.
+    context-building during extraction.
 
     Roles: 'drawing', 'specification', 'boq', 'gcc', 'matrix', 'unknown'
     """
-    stem = Path(filename).stem.lower()
-    ext = Path(filename).suffix.lower()
+    # Priority 1: Trust the DB file_type (reflects content-based detection)
+    if file_type:
+        if file_type in ("pdf_drawing", "dxf_drawing", "dwg_drawing"):
+            return "drawing"
+        if file_type == "excel_boq":
+            return "boq"
+
+    stem = Path(filename).stem.lower() if filename else ""
+    ext = Path(filename).suffix.lower() if filename else ""
 
     if ext in [".xlsx", ".xls", ".csv", ".ods"]:
         return "boq"
     if ext in [".dxf", ".dwg"]:
         return "drawing"
 
+    # Filename keyword matching (for PDFs where file_type is generic "pdf_spec")
     if any(kw in stem for kw in _DRAWING_KEYWORDS):
         return "drawing"
     if any(kw in stem for kw in _BOQ_KEYWORDS):
