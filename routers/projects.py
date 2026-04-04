@@ -1,3 +1,5 @@
+import logging
+import shutil
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -10,10 +12,12 @@ from sqlalchemy.orm import Session
 from config.models import AVAILABLE_MODELS, DEFAULT_MODEL
 from core.database import get_db
 from models.document import Document
+from models.document_chunk import DocumentChunk
 from models.project import Project
 from services.file_classifier import classify_file_type
 from services.pipeline import _run_pipeline
 
+logger = logging.getLogger("tenderiq.projects")
 router = APIRouter(prefix="", tags=["projects"])
 
 MAX_FILE_SIZE = 100 * 1024 * 1024    # 100 MB per file
@@ -142,4 +146,66 @@ async def process_project(
         "status": "processing",
         "model": model_key or DEFAULT_MODEL,
         "message": "Processing started. Poll /projects/{project_id} for status.",
+    }
+
+
+@router.delete("/projects/{project_id}")
+def delete_project(project_id: uuid.UUID, db: Session = Depends(get_db)):
+    """Permanently delete a project and ALL related data.
+
+    Cleans up:
+    1. Pinecone vectors (all chunks for this project)
+    2. PostgreSQL records (CASCADE handles documents, chunks, params, BOQ, runs, logs)
+    3. Uploaded files on disk
+    """
+    project = db.query(Project).filter(Project.project_id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_name = project.project_name
+    logger.info(f"[DELETE] Deleting project '{project_name}' ({project_id})")
+
+    # ── Step 1: Delete Pinecone vectors ──────────────────────────────────────
+    pinecone_ids = (
+        db.query(DocumentChunk.pinecone_id)
+        .filter(
+            DocumentChunk.project_id == project_id,
+            DocumentChunk.pinecone_id.isnot(None),
+        )
+        .all()
+    )
+    pinecone_ids = [pid[0] for pid in pinecone_ids if pid[0]]
+
+    if pinecone_ids:
+        try:
+            from core.clients import pinecone_index
+            BATCH = 100
+            for i in range(0, len(pinecone_ids), BATCH):
+                batch = pinecone_ids[i:i + BATCH]
+                try:
+                    pinecone_index.delete(ids=batch)
+                except Exception as e:
+                    logger.warning(f"[DELETE] Pinecone batch delete failed: {e}")
+            logger.info(f"[DELETE] Removed {len(pinecone_ids)} vectors from Pinecone")
+        except Exception as e:
+            logger.warning(f"[DELETE] Pinecone cleanup failed (non-fatal): {e}")
+
+    # ── Step 2: Delete project from PostgreSQL (CASCADE cleans related rows) ─
+    db.delete(project)
+    db.commit()
+    logger.info(f"[DELETE] Removed project '{project_name}' from database")
+
+    # ── Step 3: Delete uploaded files from disk ──────────────────────────────
+    upload_dir = Path(f"uploads/{project_id}")
+    if upload_dir.exists():
+        try:
+            shutil.rmtree(upload_dir)
+            logger.info(f"[DELETE] Removed upload directory: {upload_dir}")
+        except Exception as e:
+            logger.warning(f"[DELETE] File cleanup failed (non-fatal): {e}")
+
+    return {
+        "message": f"Project '{project_name}' deleted successfully",
+        "project_id": str(project_id),
+        "vectors_removed": len(pinecone_ids),
     }
