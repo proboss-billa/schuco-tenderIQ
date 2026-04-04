@@ -24,30 +24,35 @@ logger = logging.getLogger(__name__)
 
 # Pages with fewer extractable chars than this are treated as drawing images
 MIN_TEXT_CHARS = 100
-# DPI for rendering drawing pages — 150 gives legible annotations without huge memory
-RENDER_DPI = 150
+# DPI for rendering drawing pages — 200 gives clear annotations for dimensions/notes
+RENDER_DPI = 200
 # Max drawing pages processed via vision per document (cost/time guard)
-MAX_VISION_PAGES = 120
+MAX_VISION_PAGES = 150
 # Parallel vision processing
-VISION_BATCH_SIZE = 10   # pages rendered at once (memory guard: ~10 PNGs × 2MB = ~20MB)
+VISION_BATCH_SIZE = 10   # pages rendered at once (memory guard: ~10 PNGs × 3MB = ~30MB)
 VISION_WORKERS = 8       # concurrent Vision API calls within a batch
+# Vision model — must be kept in sync with available Gemini models
+VISION_MODEL = "gemini-2.5-flash"
 
 _DRAWING_PROMPT = """You are an expert facade/curtain wall engineer analysing a technical architectural drawing sheet.
 
-Extract ALL technical information visible. Be thorough and precise.
+Extract ALL technical information visible on this drawing. Be extremely thorough — read EVERY annotation, dimension line, note, label, and callout. Even small text matters.
 
 Cover every category you find:
-1. TITLE BLOCK — Drawing title, project name, drawing number, sheet number, scale, date, revision
-2. DIMENSIONS — All annotated measurements: heights, widths, bay spacing, sill heights, mullion/transom spacing, depths
-3. MATERIAL CALLOUTS — Glass type & thickness, aluminium alloy codes, finish specifications, sealant types
-4. FACADE SYSTEM — System designation (curtain wall, stick, unitised, etc.), mullion/transom labels, series/product codes
-5. PERFORMANCE SPECS — Wind load values, U-values, acoustic ratings, fire ratings, water tightness classes visible on drawing
-6. NOTES & LEGENDS — General notes, abbreviation keys, material legends, specification references
-7. DETAIL REFERENCES — Section marks (e.g. A/101), detail callouts, elevation markers, grid labels
-8. OPENINGS — Door/window designations, opening types (fixed/vent/tilt-turn), hardware notes
 
-Format as structured text with a heading for each category that has content. Skip empty categories.
-If the page is blank, a cover sheet, or an index with no technical drawing content, respond with exactly:
+1. TITLE BLOCK — Drawing title, project name, drawing number, sheet number, scale, date, revision, consultant name
+2. DIMENSIONS — ALL annotated measurements: overall heights/widths, floor-to-floor heights, sill heights, bay spacing, mullion/transom spacing, profile depths, glass sizes, panel sizes, opening sizes. Include the number and unit (e.g. "3200 mm", "1500 x 2400 mm")
+3. MATERIAL CALLOUTS — Glass type & thickness (e.g. "10mm+16mm gap+10mm DGU Low-E"), aluminium alloy codes (e.g. 6063-T6), finish specs (anodized, PVDF, powder coated), sealant types (structural, weather)
+4. FACADE SYSTEM — System designation (curtain wall, stick, unitised, window wall), mullion/transom labels, Schuco/Reynaers/Aluprof series codes, profile references
+5. PERFORMANCE DATA — Wind load values, U-values, acoustic ratings (STC/Rw), fire ratings, water tightness class, air permeability class visible on drawing or in notes
+6. PROFILE DETAILS — Face widths of mullions/transoms, sight lines, profile depths, structural member sizes, stack joint details, expansion joint details
+7. NOTES & LEGENDS — ALL general notes, abbreviation keys, material legends, specification references, standard references (IS, EN, BS, ASTM)
+8. DETAIL REFERENCES — Section marks (e.g. A/101), detail callouts, elevation markers, grid lines and labels
+9. OPENINGS — Door/window types & designations, opening types (fixed/casement/awning/tilt-turn/sliding), hardware notes, louver details
+10. SEALING & DRAINAGE — Sealant positions, weep holes, drainage paths, gasket types, back-up rod details, sealant bite dimensions
+
+Format as structured text with a clear heading for each category. Include ALL numbers, dimensions, and codes — do not summarize or skip values.
+If the page is blank, a cover sheet, or an index/table of contents with no technical drawing content, respond with exactly:
 PAGE TYPE: Cover/Index — no technical content
 """
 
@@ -187,14 +192,14 @@ class DrawingPDFParser:
     def _call_vision_with_retry(self, img_bytes: bytes, page_num: int) -> str:
         """Single Vision API call — retried up to 3x by tenacity. Thread-safe."""
         response = self.gemini.models.generate_content(
-            model="gemini-2.0-flash",
+            model=VISION_MODEL,
             contents=[
                 types.Part.from_bytes(data=img_bytes, mime_type="image/png"),
                 types.Part.from_text(_DRAWING_PROMPT),
             ],
             config=types.GenerateContentConfig(
                 temperature=0.1,
-                max_output_tokens=2048,
+                max_output_tokens=4096,
             ),
         )
         return response.text or ""
