@@ -7,6 +7,7 @@ from typing import List, Optional
 
 import aiofiles
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends, BackgroundTasks, Query
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from config.models import AVAILABLE_MODELS, DEFAULT_MODEL
@@ -209,3 +210,83 @@ def delete_project(project_id: uuid.UUID, db: Session = Depends(get_db)):
         "project_id": str(project_id),
         "vectors_removed": len(pinecone_ids),
     }
+
+
+# ── MIME type mapping for document serving ───────────────────────────────────
+_MIME_TYPES = {
+    ".pdf":  "application/pdf",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xls":  "application/vnd.ms-excel",
+    ".csv":  "text/csv",
+    ".ods":  "application/vnd.oasis.opendocument.spreadsheet",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".doc":  "application/msword",
+    ".dxf":  "application/dxf",
+    ".dwg":  "application/acad",
+}
+
+
+@router.get("/projects/{project_id}/documents/{document_id}/file")
+def serve_document_file(
+    project_id: uuid.UUID,
+    document_id: uuid.UUID,
+    db: Session = Depends(get_db),
+):
+    """Serve an uploaded document file for preview.
+
+    Returns the raw file with correct Content-Type so browsers can render
+    PDFs inline, open spreadsheets, etc.  Used by the frontend to open
+    source documents when a user clicks a parameter's source reference.
+    """
+    document = (
+        db.query(Document)
+        .filter(
+            Document.document_id == document_id,
+            Document.project_id == project_id,
+        )
+        .first()
+    )
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    file_path = Path(document.file_path)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found on disk")
+
+    ext = file_path.suffix.lower()
+    media_type = _MIME_TYPES.get(ext, "application/octet-stream")
+
+    return FileResponse(
+        path=str(file_path),
+        media_type=media_type,
+        filename=document.original_filename,
+        # Allow browser to render inline (PDF viewer) instead of forcing download
+        headers={"Content-Disposition": f'inline; filename="{document.original_filename}"'},
+    )
+
+
+@router.get("/projects/{project_id}/documents")
+def list_project_documents(project_id: uuid.UUID, db: Session = Depends(get_db)):
+    """List all documents in a project with their metadata."""
+    project = db.query(Project).filter(Project.project_id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    documents = (
+        db.query(Document)
+        .filter(Document.project_id == project_id)
+        .order_by(Document.original_filename)
+        .all()
+    )
+    return [
+        {
+            "document_id": str(d.document_id),
+            "filename": d.original_filename,
+            "file_type": d.file_type,
+            "file_size_bytes": d.file_size_bytes,
+            "page_count": getattr(d, "page_count", None),
+            "num_chunks": getattr(d, "num_chunks", None),
+            "processing_status": d.processing_status,
+        }
+        for d in documents
+    ]
