@@ -889,5 +889,6 @@ class DocumentProcessor:
         logger.info(f"[TIMING][BOQ_PINECONE] {doc_name}: {time.perf_counter() - t0:.2f}s ({len(pinecone_vectors)} vectors)")
 
         document.processed = True
+        document.num_chunks = len(all_texts)
         self.db.commit()
-        logger.info(f"[TIMING][BOQ_TOTAL] {doc_name}: {time.perf_counter() - t_doc_start:.2f}s")
+        logger.info(f"[TIMING][BOQ_TOTAL] {doc_name}: {time.perf_counter() - t_doc_start:.2f}s ({len(all_texts)} chunks)")
