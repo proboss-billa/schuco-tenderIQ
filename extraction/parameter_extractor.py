@@ -8,9 +8,7 @@ from models.document_chunk import DocumentChunk
 from models.extracted_parameter import ExtractedParameter
 
 import os
-from google import genai
-from google.genai import types
-from google.genai.errors import ClientError
+import anthropic
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from sqlalchemy.orm import joinedload
 
@@ -20,14 +18,13 @@ import asyncio
 from typing import Dict, List, Optional
 
 # ── Constants ────────────────────────────────────────────────────────────────
-BATCH_SIZE       = 15    # params per LLM call (was 8; larger batches = fewer calls)
-SCORE_THRESHOLD  = 0.10  # discard Pinecone hits below this relevance score
-MODEL            = "gemini-3-flash-preview"
+BATCH_SIZE       = 10    # params per LLM call — balanced: focused context + fewer calls
+SCORE_THRESHOLD  = 0.05  # low threshold — let Claude decide relevance, not vector similarity
+MODEL            = "claude-opus-4-20250514"
 
 # ── Module-level LLM rate limiter ─────────────────────────────────────────────
-# Caps total concurrent Gemini calls across ALL simultaneous pipeline runs.
-# Free tier ~60 req/min; 8 slots × ~5s/call ≈ 96 req/min ceiling.
-# Increase to 15 on paid tier. Lazy-init avoids event-loop mismatch on startup.
+# Caps total concurrent Anthropic calls across ALL simultaneous pipeline runs.
+# Lazy-init avoids event-loop mismatch on startup.
 _LLM_SEMAPHORE: Optional[asyncio.Semaphore] = None
 
 def _get_llm_semaphore() -> asyncio.Semaphore:
@@ -46,7 +43,7 @@ class ParameterExtractor:
         self.embedder        = embedding_client
         self.db              = db_session
         self.session_factory = session_factory
-        self.gemini          = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+        self.anthropic       = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
     # ── Shared helpers ────────────────────────────────────────────────────────
 
@@ -151,7 +148,7 @@ class ParameterExtractor:
     @retry(
         stop=stop_after_attempt(4),
         wait=wait_exponential(multiplier=1, min=6, max=45),
-        retry=retry_if_exception_type(ClientError)
+        retry=retry_if_exception_type((anthropic.RateLimitError, anthropic.APIStatusError))
     )
     def _call_llm_batch(self, batch_params: List[Dict], context: str) -> str:
         """Single LLM call to extract multiple parameters from shared context."""
@@ -207,20 +204,19 @@ Return ONLY a valid JSON object with each parameter name as a key:
 IMPORTANT for found=false: explanation MUST state (a) what terms were searched for, (b) whether a related value was seen but couldn't be confirmed, or (c) clearly say "Not specified in documents" — never leave explanation vague."""
 
         try:
-            response = self.gemini.models.generate_content(
+            response = self.anthropic.messages.create(
                 model=MODEL,
-                config=types.GenerateContentConfig(
-                    system_instruction="You are an expert facade engineer extracting technical parameters. Always return valid JSON.",
-                    response_mime_type="application/json",
-                    temperature=0.05,
-                ),
-                contents=prompt
+                max_tokens=4096,
+                temperature=0.05,
+                system="You are an expert facade engineer extracting technical parameters. Always return valid JSON.",
+                messages=[{"role": "user", "content": prompt}],
             )
-            return response.text
-        except ClientError as e:
-            if e.status_code == 429:
-                logger.warning(f"Rate limit hit — retrying batch of {len(batch_params)} params")
-                raise
+            return response.content[0].text
+        except anthropic.RateLimitError:
+            logger.warning(f"Rate limit hit — retrying batch of {len(batch_params)} params")
+            raise
+        except anthropic.APIStatusError as e:
+            logger.error(f"Anthropic API error: {e.status_code} — {e.message}")
             raise
 
     def _parse_batch_response(
@@ -295,7 +291,7 @@ IMPORTANT for found=false: explanation MUST state (a) what terms were searched f
     @retry(
         stop=stop_after_attempt(4),
         wait=wait_exponential(multiplier=1, min=6, max=45),
-        retry=retry_if_exception_type(ClientError)
+        retry=retry_if_exception_type((anthropic.RateLimitError, anthropic.APIStatusError))
     )
     def _call_llm(self, param_config: Dict, context: str) -> str:
         prompt = f"""You are an expert extracting technical parameters from facade/curtain wall specifications.
@@ -323,19 +319,17 @@ Set found=true if ANY relevant information exists. Include all source numbers wi
 If found=false, explanation must clearly state: what terms were searched, what (if anything) was found nearby, and confirm "Not specified in documents" if truly absent."""
 
         try:
-            response = self.gemini.models.generate_content(
+            response = self.anthropic.messages.create(
                 model=MODEL,
-                config=types.GenerateContentConfig(
-                    system_instruction="You are an expert facade engineer. Return valid JSON only.",
-                    response_mime_type="application/json",
-                    temperature=0.05,
-                ),
-                contents=prompt
+                max_tokens=2048,
+                temperature=0.05,
+                system="You are an expert facade engineer. Return valid JSON only.",
+                messages=[{"role": "user", "content": prompt}],
             )
-            return response.text
-        except ClientError as e:
-            if e.status_code == 429:
-                raise
+            return response.content[0].text
+        except anthropic.RateLimitError:
+            raise
+        except anthropic.APIStatusError:
             raise
 
     def _parse_llm_response(self, response_text: str, param_config: Dict, chunk_dicts: List[Dict]) -> Dict:
@@ -467,6 +461,18 @@ If found=false, explanation must clearly state: what terms were searched, what (
 
     # ── Async batch extraction ────────────────────────────────────────────────
 
+    async def _search_single_param(
+        self,
+        loop,
+        param: Dict,
+        project_id: str,
+        top_k: int,
+    ) -> List[Dict]:
+        """Per-parameter focused Pinecone search — returns scored chunk dicts."""
+        query = f"{param['display_name']} {' '.join(param['search_keywords'][:6])}"
+        file_types = param.get('source_types') or None
+        return await self._search_pinecone_async(loop, query, project_id, top_k, file_types=file_types)
+
     async def _extract_batch_async(
         self,
         project_id: str,
@@ -474,62 +480,54 @@ If found=false, explanation must clearly state: what terms were searched, what (
         semaphore: asyncio.Semaphore,
         num_docs: int,
     ) -> List[Dict]:
-        """Extract a batch of params with ONE search + ONE LLM call."""
+        """Per-param searches (parallel) → merge chunks → ONE LLM call."""
         async with semaphore:
             batch_names = [p['name'] for p in batch_params]
             t_start = time.perf_counter()
             loop = asyncio.get_running_loop()
 
-            # Build a combined search query from all params in the batch
-            keywords: list = []
-            for p in batch_params:
-                keywords.append(p['display_name'])
-                keywords.extend(p['search_keywords'][:4])
-            # Deduplicate while preserving order
-            seen_kw: set = set()
-            unique_kw = []
-            for kw in keywords:
-                if kw.lower() not in seen_kw:
-                    seen_kw.add(kw.lower())
-                    unique_kw.append(kw)
-            query = ' '.join(unique_kw[:25])
+            # ── Per-parameter Pinecone searches in parallel ──
+            # Each param gets its own focused search query → much better recall
+            # than one diluted combined query. Searches are fast (~100ms each).
+            # Generous top_k: retrieve broadly, let Claude decide what's relevant.
+            top_k_per_param = min(25, max(10, 3 * num_docs))
 
-            # Scale top_k with doc count — more docs → more chunks to retrieve.
-            # Old cap of 25 gave ~1 chunk/doc at 20 docs → thin context.
-            # New cap of 60: 60 chunks × ~500 words avg ≈ 26k tokens —
-            # well within Gemini Flash's 1M context window.
-            top_k = min(60, max(10, 4 * num_docs))
-
-            # Build union of source_types for all params in this batch.
-            # Pinecone search is filtered to only those document types, so a batch
-            # of Tender Drawing params searches drawing chunks first; a batch of
-            # Commercial params searches only text spec/docx chunks.
-            # _search_pinecone_async falls back to all types if none match.
-            batch_source_types: Optional[List[str]] = None
-            all_types: set = set()
-            for p in batch_params:
-                all_types.update(p.get('source_types', []))
-            if all_types:
-                batch_source_types = list(all_types)
-
-            # ── Search + fetch ──
             t0 = time.perf_counter()
-            chunk_dicts = await self._search_pinecone_async(
-                loop, query, project_id, top_k, file_types=batch_source_types
-            )
+            search_tasks = [
+                self._search_single_param(loop, p, project_id, top_k_per_param)
+                for p in batch_params
+            ]
+            search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
+
+            # ── Merge & deduplicate chunks across all param searches ──
+            # Keep highest score per chunk, preserving the best matches from each search.
+            merged_chunks: Dict[str, Dict] = {}  # pinecone_id → chunk_dict
+            for result in search_results:
+                if isinstance(result, Exception):
+                    logger.warning(f"[BATCH] Search error in batch: {result}")
+                    continue
+                for chunk in result:
+                    cid = chunk.get('pinecone_id') or chunk.get('chunk_id', '')
+                    if cid not in merged_chunks or chunk.get('score', 0) > merged_chunks[cid].get('score', 0):
+                        merged_chunks[cid] = chunk
+
+            # Sort by score descending
+            chunk_dicts = sorted(merged_chunks.values(), key=lambda c: c.get('score', 0), reverse=True)
+
             logger.info(
                 f"[TIMING][BATCH] {batch_names[0]}…{batch_names[-1]} "
-                f"search: {time.perf_counter()-t0:.2f}s → {len(chunk_dicts)} chunks"
+                f"per-param search: {time.perf_counter()-t0:.2f}s → "
+                f"{len(chunk_dicts)} unique chunks from {len(batch_params)} searches"
             )
 
             if not chunk_dicts:
                 logger.info(f"[BATCH] No chunks for batch starting {batch_names[0]} → all not-found")
                 return [{'parameter_name': p['name'], 'found': False, 'reason': 'No relevant content'} for p in batch_params]
 
-            # ── Build context — scale with doc count for full coverage ──
-            # 3 sources/doc up to 40 total: ensures representation from each document.
-            # At 20 docs: 40 sources × ~500 words avg ≈ 26k tokens — comfortable.
-            max_sources = min(40, max(8, num_docs * 3))
+            # ── Build context — generous limit since Claude Opus handles 200k context ──
+            # Each param contributed ~10-25 chunks; after dedup we might have 40-100 unique.
+            # Cap at 80 sources × ~500 words avg ≈ 40k tokens — well within Opus limits.
+            max_sources = min(80, max(15, len(chunk_dicts)))
             context = self._build_context(chunk_dicts, max_sources=max_sources)
 
             # ── LLM call — guarded by global rate limiter across all projects ──
@@ -568,6 +566,80 @@ If found=false, explanation must clearly state: what terms were searched, what (
             )
             return results
 
+    # ── Retry variant: broader search, no file-type filter ─────────────────────
+
+    async def _extract_batch_async_retry(
+        self,
+        project_id: str,
+        batch_params: List[Dict],
+        semaphore: asyncio.Semaphore,
+        num_docs: int,
+    ) -> List[Dict]:
+        """Retry pass for not-found params: broader search, all file types, more keywords."""
+        async with semaphore:
+            batch_names = [p['name'] for p in batch_params]
+            t_start = time.perf_counter()
+            loop = asyncio.get_running_loop()
+
+            # Broader search: more keywords, ALL search_keywords, no file_type filter
+            top_k_retry = min(30, max(15, 4 * num_docs))
+
+            async def _search_broad(param: Dict) -> List[Dict]:
+                # Use full keyword list + description for broader matching
+                query = (
+                    f"{param['display_name']} {param['description']} "
+                    f"{' '.join(param['search_keywords'])}"
+                )
+                # No file_type filter — search everything
+                return await self._search_pinecone_async(
+                    loop, query, project_id, top_k_retry, file_types=None
+                )
+
+            search_tasks = [_search_broad(p) for p in batch_params]
+            search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
+
+            merged_chunks: Dict[str, Dict] = {}
+            for result in search_results:
+                if isinstance(result, Exception):
+                    continue
+                for chunk in result:
+                    cid = chunk.get('pinecone_id') or chunk.get('chunk_id', '')
+                    if cid not in merged_chunks or chunk.get('score', 0) > merged_chunks[cid].get('score', 0):
+                        merged_chunks[cid] = chunk
+
+            chunk_dicts = sorted(merged_chunks.values(), key=lambda c: c.get('score', 0), reverse=True)
+
+            logger.info(
+                f"[RETRY][BATCH] {batch_names[0]}…{batch_names[-1]} "
+                f"broad search → {len(chunk_dicts)} unique chunks"
+            )
+
+            if not chunk_dicts:
+                return [{'parameter_name': p['name'], 'found': False, 'reason': 'No content (retry)'} for p in batch_params]
+
+            max_sources = min(80, max(15, len(chunk_dicts)))
+            context = self._build_context(chunk_dicts, max_sources=max_sources)
+
+            try:
+                async with _get_llm_semaphore():
+                    response_text = await asyncio.wait_for(
+                        loop.run_in_executor(None, self._call_llm_batch, batch_params, context),
+                        timeout=120.0,
+                    )
+            except (asyncio.TimeoutError, Exception) as e:
+                logger.error(f"[RETRY] LLM failed for retry batch: {e}")
+                return [{'parameter_name': p['name'], 'found': False, 'reason': f'Retry LLM error: {e}'} for p in batch_params]
+
+            results = self._parse_batch_response(response_text, batch_params, chunk_dicts)
+
+            retry_found = sum(1 for r in results if r.get('found'))
+            logger.info(
+                f"[RETRY][BATCH] {batch_names[0]}…{batch_names[-1]} "
+                f"total: {time.perf_counter()-t_start:.2f}s | "
+                f"recovered: {retry_found}/{len(results)}"
+            )
+            return results
+
     # ── Main async entry point ────────────────────────────────────────────────
 
     async def extract_all_parameters_async(
@@ -599,7 +671,7 @@ If found=false, explanation must clearly state: what terms were searched, what (
 
         batch_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Flatten and store
+        # Flatten first-pass results
         all_results: List[Dict] = []
         for batch_params, batch_result in zip(batches, batch_results):
             if isinstance(batch_result, Exception):
@@ -608,6 +680,49 @@ If found=false, explanation must clearly state: what terms were searched, what (
                     all_results.append({'parameter_name': p['name'], 'found': False, 'reason': str(batch_result)})
             else:
                 all_results.extend(batch_result)
+
+        first_pass_found = sum(1 for r in all_results if r.get('found'))
+        logger.info(
+            f"[TIMING][EXTRACT_ALL] First pass: {first_pass_found}/{len(all_results)} found — "
+            f"{time.perf_counter()-t_all_start:.2f}s"
+        )
+
+        # ── Retry pass: re-batch all not-found params with broader search ──────
+        # Uses alternate keywords + higher top_k to catch params that were missed
+        # due to search query mismatch. One efficient batch, not per-param calls.
+        not_found_names = {r['parameter_name'] for r in all_results if not r.get('found')}
+        retry_params = [p for p in facade_parameters if p['name'] in not_found_names]
+
+        if retry_params:
+            logger.info(
+                f"[RETRY] {len(retry_params)} not-found params — running retry pass"
+            )
+            retry_batches = [
+                retry_params[i:i + BATCH_SIZE]
+                for i in range(0, len(retry_params), BATCH_SIZE)
+            ]
+            retry_tasks = [
+                self._extract_batch_async_retry(project_id, batch, semaphore, num_docs)
+                for batch in retry_batches
+            ]
+            retry_results_raw = await asyncio.gather(*retry_tasks, return_exceptions=True)
+
+            # Merge retry results: override not-found with found
+            retry_map: Dict[str, Dict] = {}
+            for rb, rr in zip(retry_batches, retry_results_raw):
+                if isinstance(rr, Exception):
+                    logger.error(f"[RETRY] Batch exception: {rr}")
+                    continue
+                for r in rr:
+                    if r.get('found'):
+                        retry_map[r['parameter_name']] = r
+
+            if retry_map:
+                logger.info(f"[RETRY] Recovered {len(retry_map)} params: {list(retry_map.keys())}")
+                for i, result in enumerate(all_results):
+                    pname = result.get('parameter_name')
+                    if pname in retry_map:
+                        all_results[i] = retry_map[pname]
 
         # Persist found results
         found_count = 0
@@ -621,7 +736,8 @@ If found=false, explanation must clearly state: what terms were searched, what (
                     self._store_extraction(project_id, param_config, result)
 
         logger.info(
-            f"[TIMING][EXTRACT_ALL] Done — {found_count}/{len(all_results)} found — "
+            f"[TIMING][EXTRACT_ALL] Done — {found_count}/{len(all_results)} found "
+            f"(first pass: {first_pass_found}, retry: {found_count - first_pass_found}) — "
             f"total: {time.perf_counter()-t_all_start:.2f}s"
         )
         return all_results

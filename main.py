@@ -39,6 +39,7 @@ from google_embedding import GoogleEmbedding
 
 from google import genai
 from google.genai import types
+import anthropic
 
 app = FastAPI(title="Tender Analysis POC API", debug=True)
 
@@ -264,6 +265,7 @@ def initialize_pinecone():
 pinecone_index = initialize_pinecone()
 embedding_client = GoogleEmbedding()
 gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+anthropic_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 # ── Global pipeline concurrency cap ──────────────────────────────────────────
 # Limits simultaneous _run_pipeline executions to prevent DB pool exhaustion
@@ -1191,17 +1193,15 @@ Rules:
 - For cost/BOQ questions, show itemized breakdowns with quantities and rates when available
 - Use the conversation history to understand follow-up questions in context"""
 
-    response = gemini_client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=f"{chat_history}Question: {query}\n\nDocument Context:\n{context}",
-        config=types.GenerateContentConfig(
-            system_instruction=system_prompt,
-            max_output_tokens=2048,
-            temperature=0.3,
-        ),
+    response = anthropic_client.messages.create(
+        model="claude-opus-4-20250514",
+        max_tokens=2048,
+        temperature=0.3,
+        system=system_prompt,
+        messages=[{"role": "user", "content": f"{chat_history}Question: {query}\n\nDocument Context:\n{context}"}],
     )
 
-    answer = response.text
+    answer = response.content[0].text
 
     sources = [
         {
