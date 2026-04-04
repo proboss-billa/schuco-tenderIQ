@@ -985,21 +985,47 @@ async def adhoc_query(project_id: uuid.UUID, query: str = Form(...), db: Session
     context = "\n\n".join([
         f"[Source {i+1}: {chunk.document.original_filename}, Page {chunk.page_number or 'N/A'}, "
         f"Section: {chunk.section_title or 'N/A'}]\n{chunk.chunk_text}"
-        for i, chunk in enumerate(context_chunks[:3])
+        for i, chunk in enumerate(context_chunks[:5])
     ])
 
-    system_prompt = """You are an expert tender analyst. Answer questions based ONLY on the provided context.
-- Provide clear, direct answers with specific values and units.
-- Always cite the page number (e.g. "Page 12") and document name where the information was found.
-- If the answer isn't present, say "Information not found in documents"."""
+    # Load recent chat history for conversational context
+    recent_logs = (
+        db.query(QueryLog)
+        .filter(QueryLog.project_id == project_id)
+        .order_by(QueryLog.created_at.desc())
+        .limit(6)
+        .all()
+    )
+    recent_logs.reverse()
+    chat_history = ""
+    if recent_logs:
+        chat_history = "\n\nPrevious conversation:\n" + "\n".join(
+            f"User: {log.query_text}\nAssistant: {log.response_text}"
+            for log in recent_logs if log.response_text
+        ) + "\n\n"
+
+    system_prompt = """You are TenderIQ, an expert AI tender analyst specializing in construction, façade systems, and building specifications. You work with Schüco systems and other building envelope products.
+
+Your role is to help users understand tender documents, Bills of Quantities (BOQs), technical specifications, and project requirements by providing clear, comprehensive, and actionable answers.
+
+Guidelines:
+- Provide thorough, well-structured answers — use paragraphs, bullet points, and bold text (**bold**) for clarity.
+- When answering, explain the context and significance of the information, not just raw values.
+- Include specific values, units, measurements, and technical details from the documents.
+- Reference the source document and page number naturally within your answer (e.g., "According to the Technical Specification (Page 12)...").
+- If the question involves comparisons, provide a structured comparison.
+- If the information spans multiple documents, synthesize it into a coherent answer.
+- If the answer isn't fully present in the documents, say what you found and clearly indicate what information is missing.
+- Maintain a professional but conversational tone — like an expert colleague explaining findings.
+- Use the conversation history to understand follow-up questions in context."""
 
     response = gemini_client.models.generate_content(
-        model="gemini-3-flash-preview",
-        contents=f"Question: {query}\n\nContext:\n{context}",
+        model="gemini-2.0-flash",
+        contents=f"{chat_history}Question: {query}\n\nDocument Context:\n{context}",
         config=types.GenerateContentConfig(
             system_instruction=system_prompt,
-            max_output_tokens=500,
-            temperature=0.1,
+            max_output_tokens=2048,
+            temperature=0.3,
         ),
     )
 
@@ -1028,6 +1054,33 @@ async def adhoc_query(project_id: uuid.UUID, query: str = Form(...), db: Session
             for chunk in context_chunks[:3]
         ],
     }
+
+
+@app.get("/projects/{project_id}/chat-history")
+async def get_chat_history(project_id: uuid.UUID, db: Session = Depends(get_db)):
+    """Return all chat messages for a project, ordered chronologically."""
+    logs = (
+        db.query(QueryLog)
+        .filter(QueryLog.project_id == project_id)
+        .order_by(QueryLog.created_at.asc())
+        .all()
+    )
+    messages = []
+    for log in logs:
+        messages.append({
+            "role": "user",
+            "type": "text",
+            "content": log.query_text,
+            "timestamp": log.created_at.isoformat() if log.created_at else None,
+        })
+        if log.response_text:
+            messages.append({
+                "role": "assistant",
+                "type": "text",
+                "content": log.response_text,
+                "timestamp": log.created_at.isoformat() if log.created_at else None,
+            })
+    return {"messages": messages}
 
 
 @app.get("/me")
