@@ -223,13 +223,13 @@ def process_query(project_id: uuid.UUID, query: str, db: Session, model_key: str
             raise HTTPException(status_code=503, detail="Google AI not initialized.")
         try:
             from google import genai
-            full_prompt = f"{QUERY_SYSTEM_PROMPT}\n\n{user_content}"
             resp = gemini_client.models.generate_content(
                 model=model_id,
-                contents=full_prompt,
+                contents=user_content,
                 config=genai.types.GenerateContentConfig(
                     temperature=0.3,
                     max_output_tokens=2048,
+                    system_instruction=QUERY_SYSTEM_PROMPT,
                 ),
             )
             answer = resp.text

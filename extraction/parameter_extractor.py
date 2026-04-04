@@ -25,6 +25,7 @@ SCORE_THRESHOLD  = 0.05  # low threshold — let Claude decide relevance, not ve
 # ── Full-context extraction constants (Pass 1) ──────────────────────────────
 FULL_CONTEXT_OVERLAP       = 3         # parent chunks overlap between windows
 TOKENS_PER_WORD            = 1.35      # average tokens per word estimate
+FULL_CONTEXT_PARAM_BATCH   = 25        # max params per LLM call in full-context mode
 
 # ── Module-level LLM rate limiter ─────────────────────────────────────────────
 # Caps total concurrent Anthropic calls across ALL simultaneous pipeline runs.
@@ -107,6 +108,13 @@ class ParameterExtractor:
             parts.append(f"{header}\n{c['chunk_text']}")
         return "\n\n".join(parts)
 
+    def _compute_param_batch_size(self) -> int:
+        """Calculate optimal number of params per LLM call based on model's output limit."""
+        tokens_per_param = 150  # avg JSON output per parameter
+        safety = 0.80
+        max_batch = int((self.max_response_tokens * safety) / tokens_per_param)
+        return max(15, min(max_batch, FULL_CONTEXT_PARAM_BATCH))
+
     def _call_provider(self, system: str, prompt: str, max_tokens: int) -> str:
         """Route LLM call to the configured provider (Anthropic, Google, or OpenAI)."""
         if self.provider == "anthropic":
@@ -120,13 +128,13 @@ class ParameterExtractor:
             return response.content[0].text
         elif self.provider == "google":
             from google import genai
-            full_prompt = f"{system}\n\n{prompt}"
             response = self.gemini.models.generate_content(
                 model=self.model_id,
-                contents=full_prompt,
+                contents=prompt,
                 config=genai.types.GenerateContentConfig(
                     temperature=0.05,
                     max_output_tokens=max_tokens,
+                    system_instruction=system,
                 ),
             )
             return response.text
@@ -321,9 +329,11 @@ DOCUMENT TEXT:
 {context}
 
 RULES:
-- found=true if ANY relevant data exists, even partial/implied/derivable
+- found=true if ANY relevant data exists: explicit, partial, implied, derivable, or equivalent terminology
+- found=false ONLY when the document has absolutely NO information about this parameter
+- When uncertain between found and not-found → choose found=true with confidence 0.5-0.6 (let the user decide)
 - value: concise string with key sub-values
-- confidence: 0.9+ explicit, 0.7-0.9 inferred, 0.5-0.7 partial
+- confidence: 0.9+ explicit, 0.7-0.9 inferred/derived, 0.5-0.7 partial/implied
 - source_numbers: list of source numbers [1,2,...] with relevant info
 - explanation: MAX 15 words — keep very brief to avoid response truncation
 - EVERY parameter MUST appear in output
@@ -333,10 +343,18 @@ Return ONLY valid JSON — one key per parameter:
 
         system = (
             "You are an expert facade engineer extracting technical parameters "
-            "from complete tender documents. You have the FULL document text — "
-            "extract every parameter thoroughly. Always return valid JSON."
+            "from complete tender documents. You have the FULL document text.\n\n"
+            "EXTRACTION PHILOSOPHY: Your job is to FIND information, not gatekeep. "
+            "If a value can be derived, inferred, or is partially present → found=true. "
+            "'Not stated in exact words' is NOT a reason for found=false — use domain "
+            "expertise to recognize equivalent terminology. Only mark found=false when "
+            "the document contains absolutely NO related information. "
+            "When in doubt → found=true with lower confidence (0.5-0.7).\n"
+            "Always return valid JSON."
         )
-        return self._call_provider(system, prompt, self.max_response_tokens)
+        # Scale response tokens to batch size — avoid requesting more than needed
+        tokens_needed = min(len(all_params) * 180 + 500, self.max_response_tokens)
+        return self._call_provider(system, prompt, tokens_needed)
 
     async def _extract_full_context_async(
         self,
@@ -378,41 +396,93 @@ Return ONLY valid JSON — one key per parameter:
 
         async def _process_window(window_idx: int, window_chunks: List[Dict]) -> List[Dict]:
             context = self._build_full_context(window_chunks)
-            t0 = time.perf_counter()
-            try:
-                async with semaphore:
-                    response_text = await asyncio.wait_for(
-                        loop.run_in_executor(
-                            None, self._call_llm_full_context, facade_parameters, context
-                        ),
-                        timeout=240.0,  # generous timeout for full-context calls
-                    )
-            except asyncio.TimeoutError:
-                logger.error(f"[FULL_CONTEXT] Window {window_idx+1} timed out (240s)")
-                return []
-            except Exception as e:
-                logger.error(f"[FULL_CONTEXT] Window {window_idx+1} LLM error: {e}")
-                return []
+            param_batch_size = self._compute_param_batch_size()
+            param_batches = [
+                facade_parameters[i:i + param_batch_size]
+                for i in range(0, len(facade_parameters), param_batch_size)
+            ]
 
-            elapsed = time.perf_counter() - t0
-            logger.info(
-                f"[FULL_CONTEXT] Window {window_idx+1}/{len(windows)} "
-                f"LLM: {elapsed:.2f}s | response: {len(response_text)} chars"
-            )
+            all_window_results = []
+            for batch_idx, param_batch in enumerate(param_batches):
+                batch_label = f"Window {window_idx+1}/{len(windows)} batch {batch_idx+1}/{len(param_batches)}"
+                t0 = time.perf_counter()
+                try:
+                    async with semaphore:
+                        response_text = await asyncio.wait_for(
+                            loop.run_in_executor(
+                                None, self._call_llm_full_context, param_batch, context
+                            ),
+                            timeout=240.0,
+                        )
+                except asyncio.TimeoutError:
+                    logger.error(f"[FULL_CONTEXT] {batch_label} timed out (240s)")
+                    all_window_results.extend([
+                        {'parameter_name': p['name'], 'found': False, 'reason': 'LLM timeout'}
+                        for p in param_batch
+                    ])
+                    continue
+                except Exception as e:
+                    logger.error(f"[FULL_CONTEXT] {batch_label} LLM error: {e}")
+                    all_window_results.extend([
+                        {'parameter_name': p['name'], 'found': False, 'reason': f'LLM error: {e}'}
+                        for p in param_batch
+                    ])
+                    continue
 
-            # ── Truncation detection: try parsing, if it fails try to salvage ──
-            results = self._parse_batch_response(response_text, facade_parameters, window_chunks)
-
-            # Check if most params came back as "JSON parse failed" — indicates truncation
-            parse_failures = sum(1 for r in results if r.get('reason') == 'JSON parse failed')
-            if parse_failures == len(facade_parameters):
-                logger.warning(
-                    f"[FULL_CONTEXT] Window {window_idx+1} — entire response unparseable "
-                    f"({len(response_text)} chars). Attempting partial JSON recovery…"
+                elapsed = time.perf_counter() - t0
+                logger.info(
+                    f"[FULL_CONTEXT] {batch_label} "
+                    f"LLM: {elapsed:.2f}s | response: {len(response_text)} chars"
                 )
-                results = self._recover_truncated_json(response_text, facade_parameters, window_chunks)
 
-            return results
+                # ── Parse + truncation detection ──
+                results = self._parse_batch_response(response_text, param_batch, window_chunks)
+
+                # Check if majority of params failed — indicates truncation
+                parse_failures = sum(1 for r in results if r.get('reason') in ('JSON parse failed', 'Missing in response'))
+                if parse_failures > len(param_batch) * 0.5:
+                    logger.warning(
+                        f"[FULL_CONTEXT] {batch_label} — {parse_failures}/{len(param_batch)} params "
+                        f"missing/failed. Attempting JSON recovery…"
+                    )
+                    recovered = self._recover_truncated_json(response_text, param_batch, window_chunks)
+                    # Merge: keep recovered found results over failed ones
+                    recovered_map = {r['parameter_name']: r for r in recovered if r.get('found')}
+                    if recovered_map:
+                        results = [
+                            recovered_map.get(r['parameter_name'], r)
+                            if r.get('reason') in ('JSON parse failed', 'Missing in response')
+                            else r
+                            for r in results
+                        ]
+
+                    # If still many missing, retry just the missing params
+                    still_missing = [
+                        p for p in param_batch
+                        if any(r['parameter_name'] == p['name'] and r.get('reason') in ('JSON parse failed', 'Missing in response', 'JSON truncated')
+                               for r in results)
+                    ]
+                    if still_missing and len(still_missing) <= len(param_batch) * 0.6:
+                        logger.info(f"[FULL_CONTEXT] {batch_label} — retrying {len(still_missing)} missing params")
+                        try:
+                            async with semaphore:
+                                retry_text = await asyncio.wait_for(
+                                    loop.run_in_executor(
+                                        None, self._call_llm_full_context, still_missing, context
+                                    ),
+                                    timeout=240.0,
+                                )
+                            retry_results = self._parse_batch_response(retry_text, still_missing, window_chunks)
+                            retry_map = {r['parameter_name']: r for r in retry_results if r.get('found')}
+                            if retry_map:
+                                results = [retry_map.get(r['parameter_name'], r) for r in results]
+                                logger.info(f"[FULL_CONTEXT] {batch_label} — recovered {len(retry_map)} params on retry")
+                        except Exception as e:
+                            logger.warning(f"[FULL_CONTEXT] {batch_label} — retry failed: {e}")
+
+                all_window_results.extend(results)
+
+            return all_window_results
 
         window_tasks = [
             _process_window(i, w) for i, w in enumerate(windows)
@@ -518,7 +588,13 @@ Return ONLY a valid JSON object with each parameter name as a key:
 
 IMPORTANT for found=false: explanation MUST state (a) what terms were searched for, (b) whether a related value was seen but couldn't be confirmed, or (c) clearly say "Not specified in documents" — never leave explanation vague."""
 
-        system = "You are an expert facade engineer extracting technical parameters. Always return valid JSON."
+        system = (
+            "You are an expert facade engineer extracting technical parameters. "
+            "Your job is to FIND information — err on the side of found=true. "
+            "Use domain expertise to recognize equivalent terminology. "
+            "Only mark found=false when absolutely NO related info exists. "
+            "Always return valid JSON."
+        )
         try:
             return self._call_provider(system, prompt, 4096)
         except anthropic.RateLimitError:
@@ -712,7 +788,11 @@ Return ONLY JSON:
 Set found=true if ANY relevant information exists. Include all source numbers with relevant info.
 If found=false, explanation must clearly state: what terms were searched, what (if anything) was found nearby, and confirm "Not specified in documents" if truly absent."""
 
-        system = "You are an expert facade engineer. Return valid JSON only."
+        system = (
+            "You are an expert facade engineer. Your job is to FIND information — "
+            "err on the side of found=true. When in doubt, choose found=true with "
+            "lower confidence. Return valid JSON only."
+        )
         return self._call_provider(system, prompt, 2048)
 
     def _parse_llm_response(self, response_text: str, param_config: Dict, chunk_dicts: List[Dict]) -> Dict:
