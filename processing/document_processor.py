@@ -440,8 +440,8 @@ class DocumentProcessor:
             f"total: {time.perf_counter() - t0:.2f}s"
         )
 
-    def _parse_excel_boq(self, file_path: str) -> List[Dict]:
-        """Delegate to ExcelBOQParser."""
+    def _parse_excel_boq(self, file_path: str):
+        """Delegate to ExcelBOQParser. Returns (boq_items, text_chunks)."""
         parser = ExcelBOQParser()
         return parser.parse(file_path)
 
@@ -767,18 +767,28 @@ class DocumentProcessor:
         )
 
     def _process_boq_document(self, document):
-        """Process Excel BOQ — store items in PostgreSQL and embed into Pinecone."""
+        """Process spreadsheet BOQ — store structured items in PostgreSQL and
+        embed both structured items AND raw text chunks into Pinecone.
+
+        The parser always produces text_chunks (raw row-level text from every
+        sheet) so even non-standard layouts get indexed for LLM retrieval.
+        """
         doc_name = document.original_filename
         t_doc_start = time.perf_counter()
 
+        # ── Step 1: Parse spreadsheet ────────────────────────────────────────
         t0 = time.perf_counter()
         try:
-            boq_items = self._parse_excel_boq(document.file_path)
+            boq_items, text_chunks = self._parse_excel_boq(document.file_path)
         except Exception as e:
             logger.warning(f"Skipping BOQ parsing for {doc_name}: {e}")
-            boq_items = []
-        logger.info(f"[TIMING][BOQ_PARSE] {doc_name}: {time.perf_counter() - t0:.2f}s ({len(boq_items)} items)")
+            boq_items, text_chunks = [], []
+        logger.info(
+            f"[TIMING][BOQ_PARSE] {doc_name}: {time.perf_counter() - t0:.2f}s "
+            f"({len(boq_items)} items, {len(text_chunks)} text chunks)"
+        )
 
+        # ── Step 2: Store structured BOQ items in PostgreSQL ─────────────────
         valid_items = []
         for item in boq_items:
             try:
@@ -793,67 +803,90 @@ class DocumentProcessor:
                 logger.warning(f"Skipping BOQ item: {e}")
                 continue
 
-        # Build a rich text representation for each item and embed into Pinecone
-        if valid_items:
-            t0 = time.perf_counter()
-            texts = []
-            for item in valid_items:
-                parts = []
-                if item.get("item_number"):
-                    parts.append(f"Item: {item['item_number']}")
-                if item.get("description"):
-                    parts.append(f"Description: {item['description']}")
-                if item.get("quantity") is not None:
-                    parts.append(f"Quantity: {item['quantity']} {item.get('unit') or ''}")
-                if item.get("rate") is not None:
-                    parts.append(f"Rate: {item['rate']}")
-                if item.get("amount") is not None:
-                    parts.append(f"Amount: {item['amount']}")
-                if item.get("category"):
-                    parts.append(f"Category: {item['category']}")
-                if item.get("sub_category"):
-                    parts.append(f"Sub-category: {item['sub_category']}")
-                texts.append(" | ".join(parts))
+        # ── Step 3: Build texts for embedding ────────────────────────────────
+        # 3a. Structured item texts
+        item_texts = []
+        for item in valid_items:
+            parts = []
+            if item.get("item_number"):
+                parts.append(f"Item: {item['item_number']}")
+            if item.get("description"):
+                parts.append(f"Description: {item['description']}")
+            if item.get("quantity") is not None:
+                parts.append(f"Quantity: {item['quantity']} {item.get('unit') or ''}")
+            if item.get("rate") is not None:
+                parts.append(f"Rate: {item['rate']}")
+            if item.get("amount") is not None:
+                parts.append(f"Amount: {item['amount']}")
+            if item.get("category"):
+                parts.append(f"Category: {item['category']}")
+            if item.get("sub_category"):
+                parts.append(f"Sub-category: {item['sub_category']}")
+            item_texts.append(" | ".join(parts))
 
-            logger.info(f"[TIMING][BOQ_TEXT_BUILD] {doc_name}: {time.perf_counter() - t0:.2f}s")
-            embeddings = self._generate_embeddings(texts)
+        # 3b. Combine: structured items first, then raw text chunks
+        all_texts = item_texts + text_chunks
+        if not all_texts:
+            logger.warning(f"[BOQ] {doc_name}: no content extracted — marking done")
+            document.processed = True
+            self.db.commit()
+            return
 
-            pinecone_vectors = []
-            for chunk_index, (item, text, embedding) in enumerate(zip(valid_items, texts, embeddings)):
-                vector_id = f"{document.document_id}_boq_{chunk_index}"
+        # ── Step 4: Embed everything ─────────────────────────────────────────
+        t0 = time.perf_counter()
+        embeddings = self._generate_embeddings(all_texts)
+        logger.info(f"[TIMING][BOQ_EMBED] {doc_name}: {time.perf_counter() - t0:.2f}s ({len(all_texts)} texts)")
 
-                db_chunk = DocumentChunk(
-                    document_id=document.document_id,
-                    project_id=self.project_id,
-                    chunk_index=chunk_index,
-                    chunk_text=text,
-                    page_number=None,
-                    section_title=item.get("category"),
-                    subsection_title=item.get("sub_category"),
-                    pinecone_id=vector_id,
-                )
-                self.db.add(db_chunk)
+        # ── Step 5: Store chunks + upsert to Pinecone ────────────────────────
+        pinecone_vectors = []
+        for chunk_index, (text, embedding) in enumerate(zip(all_texts, embeddings)):
+            is_structured = chunk_index < len(item_texts)
+            vector_id = f"{document.document_id}_boq_{chunk_index}"
 
-                pinecone_vectors.append({
-                    "id": vector_id,
-                    "values": embedding,
-                    "metadata": {
-                        "document_id": str(document.document_id),
-                        "project_id": str(self.project_id),
-                        "file_type": document.file_type or "excel_boq",
-                        "section": item.get("category") or "",
-                        "subsection": item.get("sub_category") or "",
-                        "page_start": 0,
-                        "is_table": False,
-                        "text_preview": text[:200],
-                    },
-                })
+            # Section title from structured item, or sheet name from text chunk
+            section = ""
+            subsection = ""
+            if is_structured and chunk_index < len(valid_items):
+                section = valid_items[chunk_index].get("category") or ""
+                subsection = valid_items[chunk_index].get("sub_category") or ""
+            elif not is_structured:
+                # Text chunks start with "Sheet: <name>\n"
+                first_line = text.split("\n", 1)[0] if text else ""
+                if first_line.startswith("Sheet:"):
+                    section = first_line.replace("Sheet:", "").strip()
 
-            t0 = time.perf_counter()
-            PINECONE_BATCH = 100
-            for start in range(0, len(pinecone_vectors), PINECONE_BATCH):
-                self.pinecone.upsert(vectors=pinecone_vectors[start: start + PINECONE_BATCH])
-            logger.info(f"[TIMING][BOQ_PINECONE] {doc_name}: {time.perf_counter() - t0:.2f}s ({len(pinecone_vectors)} vectors)")
+            db_chunk = DocumentChunk(
+                document_id=document.document_id,
+                project_id=self.project_id,
+                chunk_index=chunk_index,
+                chunk_text=text,
+                page_number=None,
+                section_title=section or None,
+                subsection_title=subsection or None,
+                pinecone_id=vector_id,
+            )
+            self.db.add(db_chunk)
+
+            pinecone_vectors.append({
+                "id": vector_id,
+                "values": embedding,
+                "metadata": {
+                    "document_id": str(document.document_id),
+                    "project_id": str(self.project_id),
+                    "file_type": document.file_type or "excel_boq",
+                    "section": section,
+                    "subsection": subsection,
+                    "page_start": 0,
+                    "is_table": True,
+                    "text_preview": text[:200],
+                },
+            })
+
+        t0 = time.perf_counter()
+        PINECONE_BATCH = 100
+        for start in range(0, len(pinecone_vectors), PINECONE_BATCH):
+            self.pinecone.upsert(vectors=pinecone_vectors[start: start + PINECONE_BATCH])
+        logger.info(f"[TIMING][BOQ_PINECONE] {doc_name}: {time.perf_counter() - t0:.2f}s ({len(pinecone_vectors)} vectors)")
 
         document.processed = True
         self.db.commit()

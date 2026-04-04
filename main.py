@@ -279,14 +279,14 @@ def classify_file_type(filename: str) -> str:
         return "pdf_spec"
     elif ext in [".docx", ".doc"]:
         return "docx_spec"
-    elif ext in [".xlsx", ".xls"]:
+    elif ext in [".xlsx", ".xls", ".csv", ".ods"]:
         return "excel_boq"
     elif ext == ".dxf":
         return "dxf_drawing"
     elif ext == ".dwg":
         return "dwg_drawing"
     else:
-        raise ValueError(f"Unsupported file type: {filename}. Supported: PDF, DOCX, XLSX, DXF, DWG")
+        raise ValueError(f"Unsupported file type: {filename}. Supported: PDF, DOCX, XLSX, XLS, CSV, ODS, DXF, DWG")
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
