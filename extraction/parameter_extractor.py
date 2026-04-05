@@ -1223,11 +1223,12 @@ documents" if truly absent."""
         max_concurrent: int = 6,
         num_docs: int = 1,
     ) -> List[Dict]:
-        """Extract parameters using a three-pass strategy for maximum accuracy.
+        """Extract parameters using vector search + persist.
 
-        Pass 1: FULL CONTEXT — send ALL document text, extract ALL params (like Claude Web)
-        Pass 2: VECTOR SEARCH — targeted Pinecone search for still-missing params
-        Pass 3: STORE — merge and persist all results
+        Pass 1: VECTOR SEARCH — per-param Pinecone search, batched LLM calls.
+                (Formerly a fallback behind full-context extraction; full-context
+                is disabled — vector search handles every param directly.)
+        Pass 2: STORE — persist all results.
         """
         t_all_start = time.perf_counter()
         logger.info(
@@ -1259,23 +1260,26 @@ documents" if truly absent."""
         except Exception as e:
             logger.warning(f"[EXTRACT_ALL] Could not create extraction run record: {e}")
 
-        # ═══════════ PASS 1: Full-context extraction ═══════════
-        all_results = await self._extract_full_context_async(
-            project_id, facade_parameters
-        )
-        pass1_found = sum(1 for r in all_results if r.get('found'))
+        # ═══════════ PASS 1: Vector-search fallback for not-found params ═══════════
+        # Full-context extraction is disabled; seed every param as not-found so
+        # the vector-search pass below handles all of them uniformly. pass1_found
+        # stays 0 in the run stats — pass2_recovered becomes the true found count.
+        all_results = [
+            {'parameter_name': p['name'], 'found': False, 'reason': 'Pending vector search'}
+            for p in facade_parameters
+        ]
+        pass1_found = 0
         logger.info(
-            f"[EXTRACT_ALL] Pass 1 (full context): {pass1_found}/{len(all_results)} found — "
-            f"{time.perf_counter()-t_all_start:.2f}s"
+            f"[EXTRACT_ALL] Full-context pass skipped — routing all "
+            f"{len(facade_parameters)} params through vector search"
         )
 
-        # ═══════════ PASS 2: Vector-search fallback for not-found params ═══════════
         not_found_names = {r['parameter_name'] for r in all_results if not r.get('found')}
         retry_params = [p for p in facade_parameters if p['name'] in not_found_names]
 
         if retry_params:
             logger.info(
-                f"[EXTRACT_ALL] Pass 2 (vector search): {len(retry_params)} not-found params"
+                f"[EXTRACT_ALL] Vector search: {len(retry_params)} params"
             )
             # Use smaller batch size for more focused context per param
             retry_batch_size = 5
@@ -1294,7 +1298,7 @@ documents" if truly absent."""
             retry_map: Dict[str, Dict] = {}
             for rb, rr in zip(retry_batches, retry_results_raw):
                 if isinstance(rr, Exception):
-                    logger.error(f"[EXTRACT_ALL] Pass 2 batch exception: {rr}")
+                    logger.error(f"[EXTRACT_ALL] Vector-search batch exception: {rr}")
                     continue
                 for r in rr:
                     if r.get('found'):
@@ -1302,15 +1306,14 @@ documents" if truly absent."""
 
             if retry_map:
                 logger.info(
-                    f"[EXTRACT_ALL] Pass 2 recovered {len(retry_map)} params: "
-                    f"{list(retry_map.keys())}"
+                    f"[EXTRACT_ALL] Vector search recovered {len(retry_map)} params"
                 )
                 for i, result in enumerate(all_results):
                     pname = result.get('parameter_name')
                     if pname in retry_map:
                         all_results[i] = retry_map[pname]
 
-        # ═══════════ PASS 3: Persist ALL results (found + not-found) ═══════════
+        # ═══════════ PASS 2: Persist ALL results (found + not-found) ═══════════
         found_count = 0
         store_failures = []
         param_map = {p['name']: p for p in facade_parameters}
