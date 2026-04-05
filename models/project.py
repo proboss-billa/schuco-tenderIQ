@@ -92,19 +92,22 @@ class Project(Base):
     )
 
     # --- Persisted coordinator state (alembic 0004) ---
-    # Doc IDs the streaming extractor has already processed. Populated by
-    # `ExtractionCoordinator` after each pass. Reloaded on worker restart so
-    # the coordinator resumes where it left off instead of re-extracting.
+    # Both columns are `deferred=True` so the default `SELECT *` does NOT
+    # include them. This keeps Project queries working on databases where
+    # alembic 0004 hasn't been applied yet — the columns are only loaded
+    # when explicitly accessed, and the coordinator wraps those reads in
+    # try/except so a missing column degrades gracefully instead of
+    # breaking every Project-touching endpoint.
     extracted_doc_ids: Mapped[list] = mapped_column(
         JSONB,
         default=list,
         nullable=True,
+        deferred=True,
     )
 
-    # Mapping of doc_id → file_type, used by the coordinator for priority
-    # ordering (BoQ/spec before drawings). Kept in sync with indexed docs.
     doc_file_types: Mapped[dict] = mapped_column(
         JSONB,
         default=dict,
         nullable=True,
+        deferred=True,
     )

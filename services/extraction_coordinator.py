@@ -518,6 +518,12 @@ class ExtractionCoordinator:
                 project.doc_file_types = dict(self.state.doc_file_types)
                 db.commit()
         except Exception as e:
+            # Roll back so a failed column access (e.g. alembic 0004 not
+            # applied) doesn't leave the session in an aborted state.
+            try:
+                db.rollback()
+            except Exception:
+                pass
             logger.warning(f"[COORDINATOR] Failed to bump runs counter: {e}")
         finally:
             db.close()
@@ -551,6 +557,12 @@ class ExtractionCoordinator:
                     f"{len(persisted_types)} file-type hints"
                 )
         except Exception as e:
+            # deferred columns may not exist yet on DBs that haven't run
+            # alembic 0004; rollback keeps the session usable.
+            try:
+                db.rollback()
+            except Exception:
+                pass
             logger.warning(f"[COORDINATOR] Failed to hydrate persisted state: {e}")
         finally:
             db.close()
