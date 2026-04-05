@@ -17,7 +17,7 @@ from sqlalchemy.orm import joinedload
 from processing.document_processor import logger
 
 import asyncio
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 # ── Constants ────────────────────────────────────────────────────────────────
 BATCH_SIZE       = 10    # params per LLM call for vector-search fallback (Pass 2)
@@ -27,6 +27,13 @@ SCORE_THRESHOLD  = 0.05  # low threshold — let Claude decide relevance, not ve
 FULL_CONTEXT_OVERLAP       = 3         # parent chunks overlap between windows
 TOKENS_PER_WORD            = 1.35      # average tokens per word estimate
 FULL_CONTEXT_PARAM_BATCH   = 25        # max params per LLM call in full-context mode
+
+# Number of parallel parameter shards per extraction pass. Each shard runs
+# its own Pass 1 + Pass 2 on the same prefetched chunks and writes disjoint
+# rows, so they race safely under the project-level advisory lock. Keep
+# this small enough that (shards × windows × batches) stays within the
+# module-level LLM semaphore.
+SHARD_COUNT                = 4
 
 # ── Module-level LLM rate limiter ─────────────────────────────────────────────
 # Caps total concurrent Anthropic calls across ALL simultaneous pipeline runs.
@@ -458,6 +465,7 @@ Return ONLY valid JSON — one key per parameter:
         project_id: str,
         facade_parameters: List[Dict],
         document_ids_filter: Optional[set] = None,
+        prefetched_parent_chunks: Optional[List[Dict]] = None,
     ) -> List[Dict]:
         """Pass 1: Full-context extraction — send ALL document text to the LLM.
 
@@ -467,15 +475,23 @@ Return ONLY valid JSON — one key per parameter:
 
         ``document_ids_filter`` narrows the fetch to only chunks from those
         documents — used by streaming per-document incremental passes.
+
+        ``prefetched_parent_chunks`` lets the caller share a single DB fetch
+        across multiple concurrent shard invocations — used by sharded
+        Pass 1 in ``extract_all_parameters_async`` to avoid refetching the
+        same chunks N times.
         """
         t_start = time.perf_counter()
         loop = asyncio.get_running_loop()
 
-        # ── Fetch all parent chunks from DB ──
-        parent_dicts = await loop.run_in_executor(
-            None,
-            lambda: self._fetch_all_parent_chunks(project_id, document_ids_filter),
-        )
+        # ── Fetch all parent chunks from DB (or use prefetched) ──
+        if prefetched_parent_chunks is not None:
+            parent_dicts = prefetched_parent_chunks
+        else:
+            parent_dicts = await loop.run_in_executor(
+                None,
+                lambda: self._fetch_all_parent_chunks(project_id, document_ids_filter),
+            )
         total_tokens = sum(self._estimate_tokens(c['chunk_text']) for c in parent_dicts)
         logger.info(
             f"[FULL_CONTEXT] {len(parent_dicts)} parent chunks, "
@@ -1265,63 +1281,91 @@ If found=false, explanation must clearly state: what terms were searched, what (
         except Exception as e:
             logger.warning(f"[EXTRACT_ALL] Could not create extraction run record: {e}")
 
-        # ═══════════ PASS 1: Full-context extraction ═══════════
-        all_results = await self._extract_full_context_async(
-            project_id, facade_parameters, document_ids_filter=document_ids_filter
+        # ═══════════ Prefetch parent chunks ONCE for all shards ═══════════
+        loop = asyncio.get_running_loop()
+        shared_parent_chunks = await loop.run_in_executor(
+            None,
+            lambda: self._fetch_all_parent_chunks(project_id, document_ids_filter),
         )
-        pass1_found = sum(1 for r in all_results if r.get('found'))
+
+        # ═══════════ Shard parameters for parallel Pass 1 + Pass 2 ═══════════
+        # Modulo slicing keeps shards balanced even if some params are
+        # systematically slower than others. Each shard runs its own
+        # Pass 1 (full-context) and Pass 2 (vector fallback) against the
+        # SAME prefetched chunks, concurrently under the LLM semaphore.
+        shards = [facade_parameters[i::SHARD_COUNT] for i in range(SHARD_COUNT)]
+        shards = [s for s in shards if s]
         logger.info(
-            f"[EXTRACT_ALL] Pass 1 (full context): {pass1_found}/{len(all_results)} found — "
-            f"{time.perf_counter()-t_all_start:.2f}s"
+            f"[EXTRACT_ALL] Dispatching {len(facade_parameters)} params across "
+            f"{len(shards)} shards ({[len(s) for s in shards]})"
         )
 
-        # ═══════════ PASS 2: Vector-search fallback for not-found params ═══════════
-        not_found_names = {r['parameter_name'] for r in all_results if not r.get('found')}
-        retry_params = [p for p in facade_parameters if p['name'] in not_found_names]
-
-        if skip_vector_fallback and retry_params:
-            logger.info(
-                f"[EXTRACT_ALL] Skipping Pass 2 vector fallback ({len(retry_params)} missing) — "
-                f"will be retried on the final pass"
+        async def _run_shard(shard_idx: int, shard_params: List[Dict]) -> Tuple[int, List[Dict]]:
+            """Run Pass 1 + Pass 2 for a single parameter shard."""
+            t_shard = time.perf_counter()
+            shard_results = await self._extract_full_context_async(
+                project_id,
+                shard_params,
+                document_ids_filter=document_ids_filter,
+                prefetched_parent_chunks=shared_parent_chunks,
             )
-            retry_params = []
+            shard_pass1_found = sum(1 for r in shard_results if r.get('found'))
 
-        if retry_params:
-            logger.info(
-                f"[EXTRACT_ALL] Pass 2 (vector search): {len(retry_params)} not-found params"
-            )
-            # Use smaller batch size for more focused context per param
-            retry_batch_size = 5
-            retry_batches = [
-                retry_params[i:i + retry_batch_size]
-                for i in range(0, len(retry_params), retry_batch_size)
-            ]
-            semaphore = asyncio.Semaphore(max_concurrent)
-            retry_tasks = [
-                self._extract_batch_async(project_id, batch, semaphore, num_docs)
-                for batch in retry_batches
-            ]
-            retry_results_raw = await asyncio.gather(*retry_tasks, return_exceptions=True)
+            # Pass 2: per-shard vector fallback. Fires as soon as this shard's
+            # Pass 1 finishes — no need to wait for peer shards.
+            shard_not_found = {
+                r['parameter_name'] for r in shard_results if not r.get('found')
+            }
+            shard_retry = [p for p in shard_params if p['name'] in shard_not_found]
+            if skip_vector_fallback:
+                shard_retry = []
 
-            # Merge: override not-found with found from vector search
-            retry_map: Dict[str, Dict] = {}
-            for rb, rr in zip(retry_batches, retry_results_raw):
-                if isinstance(rr, Exception):
-                    logger.error(f"[EXTRACT_ALL] Pass 2 batch exception: {rr}")
-                    continue
-                for r in rr:
-                    if r.get('found'):
-                        retry_map[r['parameter_name']] = r
-
-            if retry_map:
-                logger.info(
-                    f"[EXTRACT_ALL] Pass 2 recovered {len(retry_map)} params: "
-                    f"{list(retry_map.keys())}"
+            if shard_retry:
+                retry_batch_size = 5
+                retry_batches = [
+                    shard_retry[i:i + retry_batch_size]
+                    for i in range(0, len(shard_retry), retry_batch_size)
+                ]
+                sem = asyncio.Semaphore(max_concurrent)
+                retry_tasks = [
+                    self._extract_batch_async(project_id, batch, sem, num_docs)
+                    for batch in retry_batches
+                ]
+                retry_results_raw = await asyncio.gather(
+                    *retry_tasks, return_exceptions=True
                 )
-                for i, result in enumerate(all_results):
-                    pname = result.get('parameter_name')
-                    if pname in retry_map:
-                        all_results[i] = retry_map[pname]
+                retry_map: Dict[str, Dict] = {}
+                for rr in retry_results_raw:
+                    if isinstance(rr, Exception):
+                        logger.error(
+                            f"[EXTRACT_ALL] Shard {shard_idx+1} Pass 2 exc: {rr}"
+                        )
+                        continue
+                    for r in rr:
+                        if r.get('found'):
+                            retry_map[r['parameter_name']] = r
+                if retry_map:
+                    shard_results = [
+                        retry_map.get(r['parameter_name'], r) for r in shard_results
+                    ]
+
+            logger.info(
+                f"[EXTRACT_ALL] Shard {shard_idx+1}/{len(shards)}: "
+                f"{sum(1 for r in shard_results if r.get('found'))}/{len(shard_params)} found "
+                f"(pass1: {shard_pass1_found}) — "
+                f"{time.perf_counter() - t_shard:.2f}s"
+            )
+            return shard_pass1_found, shard_results
+
+        shard_outputs = await asyncio.gather(
+            *[_run_shard(i, s) for i, s in enumerate(shards)]
+        )
+        pass1_found = sum(p for p, _ in shard_outputs)
+        all_results: List[Dict] = [r for _, sr in shard_outputs for r in sr]
+        logger.info(
+            f"[EXTRACT_ALL] All shards done: {sum(1 for r in all_results if r.get('found'))}/"
+            f"{len(all_results)} found — {time.perf_counter()-t_all_start:.2f}s"
+        )
 
         # ═══════════ PASS 3: Persist ALL results (found + not-found) ═══════════
         found_count = 0
