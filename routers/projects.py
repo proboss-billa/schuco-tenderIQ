@@ -47,6 +47,7 @@ async def create_project(
     project_name: str = Form(...),
     project_description: str = Form(None),
     project_type: str = Form("commercial"),
+    streaming_extraction: str = Form("true"),
     files: List[UploadFile] = File(...),
     db: Session = Depends(get_db),
 ):
@@ -55,11 +56,18 @@ async def create_project(
     if p_type not in ("commercial", "residential"):
         p_type = "commercial"
 
+    # Streaming extraction flag — defaults on, users can opt out to get
+    # the legacy "wait for everything, then extract" behavior.
+    streaming_flag = str(streaming_extraction).lower().strip() not in (
+        "false", "0", "no", "off",
+    )
+
     project = Project(
         project_name=project_name,
         project_description=project_description,
         project_type=p_type,
         processing_status="uploaded",
+        streaming_extraction=streaming_flag,
     )
     db.add(project)
     db.commit()

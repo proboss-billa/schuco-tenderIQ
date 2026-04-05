@@ -95,3 +95,8 @@ async def publish(project_id, event_type: str, payload: dict[str, Any]) -> None:
 
 def has_listeners(project_id) -> bool:
     return bool(_listeners.get(_key(project_id)))
+
+
+def snapshot_listener_counts() -> dict[str, int]:
+    """Return `{project_id: listener_count}` for health endpoints."""
+    return {k: len(v) for k, v in _listeners.items() if v}

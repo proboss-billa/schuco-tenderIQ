@@ -252,6 +252,86 @@ async def stream_parameters(project_id: uuid.UUID):
     )
 
 
+@router.get("/health/event-bus")
+async def event_bus_health():
+    """Lightweight introspection of the SSE listener map.
+
+    Useful for debugging leaked connections or diagnosing "why is nothing
+    streaming" issues. Returns `{project_id: listener_count}` for every
+    project that currently has at least one listener attached.
+    """
+    counts = event_bus.snapshot_listener_counts()
+    return {
+        "listener_counts": counts,
+        "total_listeners": sum(counts.values()),
+        "active_projects": len(counts),
+    }
+
+
+@router.get("/projects/{project_id}/parameters/{parameter_name}/sources")
+async def get_parameter_sources(
+    project_id: uuid.UUID,
+    parameter_name: str,
+    db: Session = Depends(get_db),
+):
+    """Return structured evidence (sources + history) for a single parameter.
+
+    Frontends use this to power the "show evidence" modal and the value-
+    change history popover without re-parsing `all_sources` JSON blobs
+    client-side or joining tables themselves.
+    """
+    param = (
+        db.query(ExtractedParameter)
+        .filter(
+            ExtractedParameter.project_id == project_id,
+            ExtractedParameter.parameter_name == parameter_name,
+        )
+        .first()
+    )
+    if not param:
+        raise HTTPException(status_code=404, detail="Parameter not found")
+
+    # Parse the JSON-encoded columns defensively.
+    try:
+        all_sources = _json.loads(param.all_sources) if param.all_sources else []
+    except (ValueError, TypeError):
+        all_sources = []
+    try:
+        history = _json.loads(param.history) if param.history else []
+    except (ValueError, TypeError):
+        history = []
+
+    # Join primary source chunk text for display (if any).
+    chunk_text = None
+    if param.source_chunk_id and param.source_chunk:
+        chunk_text = param.source_chunk.chunk_text
+
+    return {
+        "parameter_key": param.parameter_name,
+        "parameter_name": param.parameter_display_name,
+        "value": param.value_text,
+        "unit": param.unit,
+        "confidence": float(param.confidence_score) if param.confidence_score is not None else None,
+        "lifecycle_status": getattr(param, "lifecycle_status", None),
+        "change_count": getattr(param, "change_count", 0) or 0,
+        "last_changed_at": (
+            param.last_changed_at.isoformat() + "Z"
+            if getattr(param, "last_changed_at", None) else None
+        ),
+        "primary_source": {
+            "document": param.source_document.original_filename if param.source_document else None,
+            "document_id": str(param.source_document_id) if param.source_document_id else None,
+            "page": param.source_page_number,
+            "section": param.source_section,
+            "subsection": param.source_subsection,
+            "chunk_text": chunk_text,
+        },
+        "sources": all_sources,
+        "history": history,
+        "notes": param.notes,
+    }
+
+
 @router.post("/projects/{project_id}/re-extract", status_code=202)
 async def re_extract_parameters(
     project_id: uuid.UUID,

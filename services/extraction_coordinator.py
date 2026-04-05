@@ -41,10 +41,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+from sqlalchemy import text
+
 from config.parameters import FACADE_PARAMETERS
 from core.clients import pinecone_index, embedding_client
 from core.database import SessionLocal
 from extraction.parameter_extractor import ParameterExtractor
+from models.extracted_parameter import ExtractedParameter, LIFECYCLE_FINAL
 from models.project import Project
 from services import event_bus
 
@@ -115,6 +118,12 @@ class ExtractionCoordinator:
     async def run_loop(self) -> None:
         """Event-driven scheduler. Exits after final pass."""
         logger.info(f"[COORDINATOR {self.state.project_id[:8]}] Starting run loop")
+        # Legacy-row backfill: projects that completed before streaming existed
+        # have rows without lifecycle_status; mark them `final` on first touch
+        # so the UI doesn't show them as tentative.
+        await asyncio.get_event_loop().run_in_executor(
+            None, self._backfill_legacy_lifecycle
+        )
         try:
             while True:
                 # Wait for either a doc-indexed event or completion.
@@ -211,6 +220,20 @@ class ExtractionCoordinator:
                 "duration_ms": duration_ms,
             },
         )
+        # Structured metrics line for log aggregators / dashboards.
+        logger.info(
+            "[METRICS][EXTRACTION_PASS] "
+            f"project_id={self.state.project_id} "
+            f"pass_number={run_number} "
+            f"is_final=false "
+            f"docs_indexed={len(self.state.indexed_doc_ids)} "
+            f"params_updated={len(result.get('updated', []))} "
+            f"params_new={len(result.get('new', []))} "
+            f"params_unchanged={len(result.get('unchanged', []))} "
+            f"total_found={result.get('total_found', 0)} "
+            f"skipped_pass={result.get('skipped_pass', False)} "
+            f"duration_ms={duration_ms}"
+        )
         logger.info(
             f"[COORDINATOR {self.state.project_id[:8]}] "
             f"Incremental pass #{run_number} done in {duration_ms}ms — "
@@ -244,14 +267,46 @@ class ExtractionCoordinator:
             },
         )
         logger.info(
+            "[METRICS][EXTRACTION_PASS] "
+            f"project_id={self.state.project_id} "
+            f"pass_number={self.state.runs_done} "
+            f"is_final=true "
+            f"docs_indexed={len(self.state.indexed_doc_ids)} "
+            f"params_updated={len(result.get('updated', []))} "
+            f"params_new={len(result.get('new', []))} "
+            f"params_unchanged={len(result.get('unchanged', []))} "
+            f"total_found={result.get('total_found', 0)} "
+            f"duration_ms={duration_ms}"
+        )
+        logger.info(
             f"[COORDINATOR {self.state.project_id[:8]}] "
             f"Final pass done in {duration_ms}ms"
         )
 
     async def _invoke_extraction(self, *, is_final: bool) -> dict:
-        """Invoke ParameterExtractor.extract_incremental in a fresh DB session."""
+        """Invoke ParameterExtractor.extract_incremental in a fresh DB session.
+
+        Wraps the extraction in a PostgreSQL advisory lock keyed on the
+        project's UUID so a manual /re-extract can't race with the coordinator.
+        """
         db = SessionLocal()
+        lock_acquired = False
+        # Derive a 64-bit integer lock key from the project UUID.
+        # Python `hash()` is randomized per-process, so we use hex slicing.
         try:
+            lock_key = int(self.state.project_id.replace("-", "")[:15], 16)
+        except Exception:
+            lock_key = abs(hash(self.state.project_id)) % (2**63 - 1)
+        try:
+            try:
+                db.execute(text("SELECT pg_advisory_lock(:k)"), {"k": lock_key})
+                lock_acquired = True
+            except Exception as e:
+                logger.warning(
+                    f"[COORDINATOR {self.state.project_id[:8]}] "
+                    f"Advisory lock failed ({e}) — proceeding without lock"
+                )
+
             project = db.query(Project).filter(
                 Project.project_id == self.state.project_id
             ).first()
@@ -282,6 +337,48 @@ class ExtractionCoordinator:
                 on_param_update=self._publish_param_update,
             )
             return result or {}
+        finally:
+            if lock_acquired:
+                try:
+                    db.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": lock_key})
+                    db.commit()
+                except Exception:
+                    pass
+            db.close()
+
+    def _backfill_legacy_lifecycle(self) -> None:
+        """Mark pre-streaming rows as `final` so they don't appear tentative.
+
+        Projects created before the streaming migration have rows where
+        `lifecycle_status` defaults to 'tentative'. If the project is already
+        `completed`, those rows should actually be `final`.
+        """
+        db = SessionLocal()
+        try:
+            project = db.query(Project).filter(
+                Project.project_id == self.state.project_id
+            ).first()
+            if project and project.processing_status == "completed":
+                updated = (
+                    db.query(ExtractedParameter)
+                    .filter(
+                        ExtractedParameter.project_id == self.state.project_id,
+                        ExtractedParameter.lifecycle_status != LIFECYCLE_FINAL,
+                    )
+                    .update(
+                        {ExtractedParameter.lifecycle_status: LIFECYCLE_FINAL},
+                        synchronize_session=False,
+                    )
+                )
+                if updated:
+                    db.commit()
+                    logger.info(
+                        f"[COORDINATOR {self.state.project_id[:8]}] "
+                        f"Backfilled {updated} legacy rows to final"
+                    )
+        except Exception as e:
+            logger.warning(f"[COORDINATOR] legacy backfill failed: {e}")
+            db.rollback()
         finally:
             db.close()
 

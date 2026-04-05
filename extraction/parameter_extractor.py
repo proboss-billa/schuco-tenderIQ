@@ -1557,6 +1557,10 @@ If found=false, explanation must clearly state: what terms were searched, what (
             .all()
         ) if to_extract else []
 
+        # Confidence margin required for a new value to overwrite an older one.
+        # Below this the extraction is considered "noise" and we keep the prior.
+        _MERGE_CONFIDENCE_MARGIN = 0.05
+
         for row in touched_rows:
             name = row.parameter_name
             prior = prior_values.get(name)
@@ -1568,6 +1572,32 @@ If found=false, explanation must clearly state: what terms were searched, what (
             if not is_new:
                 old_value = prior.get("value_text")
                 value_changed = (old_value or "") != (new_value or "") and (new_value is not None)
+
+            # ── Merge rollback: if a re-extraction produced a different value
+            # with materially lower confidence than the existing one, discard
+            # the new value and restore the prior. Prevents a noisy pass from
+            # clobbering a stable answer. Final passes bypass this guard so
+            # Pass 2 vector search results can still land.
+            if (
+                not is_new
+                and value_changed
+                and not is_final
+                and prior.get("confidence") is not None
+                and new_conf is not None
+                and new_conf < (prior.get("confidence") or 0) - _MERGE_CONFIDENCE_MARGIN
+            ):
+                logger.info(
+                    f"[EXTRACT_INCREMENTAL] Rollback {name}: new_conf={new_conf:.2f} "
+                    f"< prior_conf={prior.get('confidence'):.2f} — keeping prior value"
+                )
+                row.value_text = prior.get("value_text")
+                if prior.get("value_numeric") is not None:
+                    row.value_numeric = prior.get("value_numeric")
+                row.confidence_score = prior.get("confidence")
+                # Reset change detection so we don't double-count the aborted flip
+                value_changed = False
+                new_value = row.value_text
+                new_conf = prior.get("confidence")
 
             # Update lifecycle fields on the row
             row.evidence_fingerprint = current_fingerprint
