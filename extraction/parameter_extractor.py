@@ -2,6 +2,7 @@
 import json
 import time
 import re
+from datetime import datetime
 
 from config.parameters import FACADE_PARAMETERS
 from config.models import AVAILABLE_MODELS, DEFAULT_MODEL, get_model_config
@@ -1373,3 +1374,299 @@ If found=false, explanation must clearly state: what terms were searched, what (
         context      = self._build_context(chunk_dicts, max_sources=5)
         response_text = self._call_llm(param_config, context)
         return self._parse_llm_response(response_text, param_config, chunk_dicts)
+
+    # ────────────────────────────────────────────────────────────────────
+    # Streaming extraction entry point
+    # ────────────────────────────────────────────────────────────────────
+
+    # How many consecutive unchanged passes promote a parameter from
+    # `tentative` → `stable`. Stable params with high confidence are
+    # skipped in subsequent incremental passes until the corpus changes.
+    _STABLE_PROMOTION_THRESHOLD = 2
+    # Confidence floor below which we always re-extract.
+    _STABLE_CONFIDENCE_FLOOR = 0.85
+
+    async def extract_incremental(
+        self,
+        project_id: str,
+        facade_parameters: List[Dict],
+        is_final: bool = False,
+        on_param_update=None,
+    ) -> Dict:
+        """Run an incremental (or final) parameter extraction pass.
+
+        Called by `ExtractionCoordinator` once per debounced batch of
+        newly-indexed documents. Uses an evidence fingerprint over the
+        current set of level-0 parent chunks to decide whether re-running
+        the LLM is even worth it.
+
+        • If the fingerprint is unchanged since the last incremental pass
+          AND ``is_final`` is False, the whole pass is skipped (no LLM calls).
+        • Otherwise, parameters that are already `stable`/`final` with
+          confidence ≥ _STABLE_CONFIDENCE_FLOOR are skipped individually;
+          only the remaining parameters are sent to the LLM.
+        • After extraction, each touched row has its lifecycle fields
+          updated: `evidence_fingerprint`, `last_changed_at` (only when the
+          value actually flipped), `change_count`, `history`, and
+          `lifecycle_status` promoted per the rules below.
+
+        Lifecycle transitions:
+            new             → tentative
+            tentative  (unchanged for _STABLE_PROMOTION_THRESHOLD passes) → stable
+            any        (value flipped >2 times) → conflict
+            any        (is_final=True)          → final
+
+        Parameters
+        ----------
+        project_id      : project UUID string
+        facade_parameters : parameter configs filtered by project_type
+        is_final        : final pass flag — promotes all rows to final
+        on_param_update : optional async callback invoked with a dict
+                          `{parameter_name, value, confidence, sources,
+                            lifecycle_status, changed}` so the coordinator
+                          can stream events to the UI.
+
+        Returns
+        -------
+        dict:
+            updated     : list of parameter_name whose value changed
+            new         : list of parameter_name inserted for the first time
+            unchanged   : list of parameter_name skipped or re-confirmed
+            total_found : int — params with a value after this pass
+            skipped_pass: bool — True if nothing was re-extracted at all
+        """
+        from models.extracted_parameter import (
+            ExtractedParameter,
+            LIFECYCLE_FINAL,
+            LIFECYCLE_STABLE,
+            LIFECYCLE_TENTATIVE,
+            LIFECYCLE_CONFLICT,
+            CONFLICT_CHANGE_THRESHOLD,
+        )
+
+        # ── 1. Compute current evidence fingerprint ─────────────────────────
+        parent_chunks = await asyncio.get_event_loop().run_in_executor(
+            None, self._fetch_all_parent_chunks, project_id
+        )
+        chunk_ids = [c.get("chunk_id") for c in parent_chunks if c.get("chunk_id")]
+        current_fingerprint = ExtractedParameter.compute_fingerprint(chunk_ids)
+
+        logger.info(
+            f"[EXTRACT_INCREMENTAL] project={project_id[:8]} is_final={is_final} "
+            f"parent_chunks={len(parent_chunks)} fp={current_fingerprint[:10]}"
+        )
+
+        # ── 2. Snapshot existing rows ───────────────────────────────────────
+        existing_rows = (
+            self.db.query(ExtractedParameter)
+            .filter(ExtractedParameter.project_id == project_id)
+            .all()
+        )
+        existing_map = {r.parameter_name: r for r in existing_rows}
+
+        # Snapshot pre-extraction values keyed by name so we can detect flips.
+        prior_values: Dict[str, Dict] = {}
+        for r in existing_rows:
+            prior_values[r.parameter_name] = {
+                "value_text": r.value_text,
+                "value_numeric": float(r.value_numeric) if r.value_numeric is not None else None,
+                "confidence": float(r.confidence_score) if r.confidence_score is not None else None,
+                "fingerprint": r.evidence_fingerprint,
+                "lifecycle_status": r.lifecycle_status or LIFECYCLE_TENTATIVE,
+                "change_count": r.change_count or 0,
+            }
+
+        # ── 3. Decide whether to skip the whole pass ────────────────────────
+        # Only skip if EVERY existing row already has the current fingerprint
+        # and there are no parameters missing from the DB. The final pass
+        # never short-circuits.
+        all_params_present = all(
+            p["name"] in existing_map for p in facade_parameters
+        )
+        all_fingerprints_match = existing_rows and all(
+            (r.evidence_fingerprint or "") == current_fingerprint for r in existing_rows
+        )
+        if (not is_final) and all_params_present and all_fingerprints_match:
+            logger.info(
+                f"[EXTRACT_INCREMENTAL] Fingerprint unchanged — skipping pass entirely"
+            )
+            return {
+                "updated": [],
+                "new": [],
+                "unchanged": [p["name"] for p in facade_parameters],
+                "total_found": sum(1 for r in existing_rows if r.value_text),
+                "skipped_pass": True,
+            }
+
+        # ── 4. Build re-extract filter list ─────────────────────────────────
+        # Skip individual params that are already stable/final with good
+        # confidence AND whose fingerprint hasn't moved.
+        to_extract: List[Dict] = []
+        skipped: List[str] = []
+        for p in facade_parameters:
+            name = p["name"]
+            row = existing_map.get(name)
+            if row is None:
+                to_extract.append(p)
+                continue
+            conf = float(row.confidence_score) if row.confidence_score is not None else 0.0
+            status = row.lifecycle_status or LIFECYCLE_TENTATIVE
+            fp_match = (row.evidence_fingerprint or "") == current_fingerprint
+            is_confident = conf >= self._STABLE_CONFIDENCE_FLOOR
+            is_locked = status in (LIFECYCLE_STABLE, LIFECYCLE_FINAL)
+            # On the final pass, re-run anything not yet confidently answered
+            # so Pass 2 vector search can recover missing params.
+            if is_final:
+                if row.value_text and is_confident and is_locked:
+                    skipped.append(name)
+                else:
+                    to_extract.append(p)
+            else:
+                if is_locked and is_confident and fp_match:
+                    skipped.append(name)
+                else:
+                    to_extract.append(p)
+
+        logger.info(
+            f"[EXTRACT_INCREMENTAL] Re-extracting {len(to_extract)} params, "
+            f"skipping {len(skipped)} (stable+confident)"
+        )
+
+        # ── 5. Run the existing full-context extractor on the filtered list ─
+        updated: List[str] = []
+        new_list: List[str] = []
+        extractions: List[Dict] = []
+        if to_extract:
+            extractions = await self.extract_all_parameters_async(
+                project_id=project_id,
+                facade_parameters=to_extract,
+                max_concurrent=10,
+                num_docs=len({c.get("document_id") for c in parent_chunks if c.get("document_id")}) or 1,
+            )
+
+        # ── 6. Merge results + update lifecycle fields ──────────────────────
+        # Re-query so we see the rows `extract_all_parameters_async` just
+        # upserted with their new values.
+        self.db.expire_all()
+        touched_rows = (
+            self.db.query(ExtractedParameter)
+            .filter(
+                ExtractedParameter.project_id == project_id,
+                ExtractedParameter.parameter_name.in_([p["name"] for p in to_extract]) if to_extract else False,
+            )
+            .all()
+        ) if to_extract else []
+
+        for row in touched_rows:
+            name = row.parameter_name
+            prior = prior_values.get(name)
+            new_value = row.value_text
+            new_conf = float(row.confidence_score) if row.confidence_score is not None else None
+
+            is_new = prior is None
+            value_changed = False
+            if not is_new:
+                old_value = prior.get("value_text")
+                value_changed = (old_value or "") != (new_value or "") and (new_value is not None)
+
+            # Update lifecycle fields on the row
+            row.evidence_fingerprint = current_fingerprint
+            if is_new:
+                row.lifecycle_status = LIFECYCLE_FINAL if is_final else LIFECYCLE_TENTATIVE
+                row.change_count = 0
+                row.last_changed_at = datetime.utcnow() if new_value else None
+                new_list.append(name)
+            elif value_changed:
+                # Archive the prior value into history, bump counter.
+                try:
+                    row.append_history(
+                        value=prior.get("value_text"),
+                        confidence=prior.get("confidence"),
+                        sources=None,
+                    )
+                except Exception:
+                    pass
+                row.change_count = (prior.get("change_count") or 0) + 1
+                row.last_changed_at = datetime.utcnow()
+                if is_final:
+                    row.lifecycle_status = LIFECYCLE_FINAL
+                elif row.change_count > CONFLICT_CHANGE_THRESHOLD:
+                    row.lifecycle_status = LIFECYCLE_CONFLICT
+                else:
+                    row.lifecycle_status = LIFECYCLE_TENTATIVE
+                updated.append(name)
+            else:
+                # Same value across passes — promotion candidate.
+                if is_final:
+                    row.lifecycle_status = LIFECYCLE_FINAL
+                elif (prior.get("lifecycle_status") == LIFECYCLE_TENTATIVE):
+                    # Promote to stable after one unchanged re-extraction at
+                    # good confidence.
+                    if new_conf is not None and new_conf >= self._STABLE_CONFIDENCE_FLOOR:
+                        row.lifecycle_status = LIFECYCLE_STABLE
+
+        # ── 7. Update lifecycle for skipped-but-present rows ────────────────
+        for name in skipped:
+            row = existing_map.get(name)
+            if row is None:
+                continue
+            row.evidence_fingerprint = current_fingerprint
+            if is_final:
+                row.lifecycle_status = LIFECYCLE_FINAL
+
+        self.db.commit()
+
+        # ── 8. Fire per-param callbacks ─────────────────────────────────────
+        if on_param_update is not None:
+            # Touched rows (extracted this pass)
+            for row in touched_rows:
+                try:
+                    await on_param_update({
+                        "parameter_name": row.parameter_name,
+                        "value": row.value_text,
+                        "confidence": float(row.confidence_score) if row.confidence_score is not None else None,
+                        "unit": row.unit,
+                        "lifecycle_status": row.lifecycle_status,
+                        "sources": row.all_sources,
+                        "change_count": row.change_count or 0,
+                        "changed": (row.parameter_name in updated) or (row.parameter_name in new_list),
+                    })
+                except Exception as cb_err:
+                    logger.warning(f"[EXTRACT_INCREMENTAL] callback error: {cb_err}")
+            # Also emit for skipped rows when this is the final pass, so the
+            # UI can flip their chip from stable → final.
+            if is_final:
+                for name in skipped:
+                    row = existing_map.get(name)
+                    if row is None:
+                        continue
+                    try:
+                        await on_param_update({
+                            "parameter_name": row.parameter_name,
+                            "value": row.value_text,
+                            "confidence": float(row.confidence_score) if row.confidence_score is not None else None,
+                            "unit": row.unit,
+                            "lifecycle_status": row.lifecycle_status,
+                            "sources": row.all_sources,
+                            "change_count": row.change_count or 0,
+                            "changed": False,
+                        })
+                    except Exception:
+                        pass
+
+        total_found = (
+            self.db.query(ExtractedParameter)
+            .filter(
+                ExtractedParameter.project_id == project_id,
+                ExtractedParameter.value_text.isnot(None),
+            )
+            .count()
+        )
+
+        return {
+            "updated": updated,
+            "new": new_list,
+            "unchanged": skipped,
+            "total_found": total_found,
+            "skipped_pass": False,
+        }

@@ -1,16 +1,19 @@
+import asyncio
 import json as _json
 import uuid
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from config.parameters import FACADE_PARAMETERS
 from config.models import list_models, AVAILABLE_MODELS, DEFAULT_MODEL
-from core.database import get_db
+from core.database import SessionLocal, get_db
 from models.document import Document
 from models.extracted_parameter import ExtractedParameter
 from models.project import Project
+from services import event_bus
 from services.extraction import _run_extraction, _run_single_extraction
 
 router = APIRouter(prefix="", tags=["parameters"])
@@ -109,6 +112,144 @@ async def get_extracted_parameters(project_id: uuid.UUID, db: Session = Depends(
         "total_extracted": len(results),
         "documents": documents_info,
     }
+
+
+# ─── SSE streaming endpoint ─────────────────────────────────────────────────
+#
+# The streaming extraction coordinator publishes events via `services.event_bus`
+# as documents index and parameters get (re)extracted. This endpoint exposes
+# that stream over Server-Sent Events so the frontend can render live.
+#
+# Protocol (text/event-stream):
+#   event: snapshot        — initial full state payload on connect
+#   event: doc_indexed     — a document finished indexing
+#   event: param_updated   — a parameter row was inserted or updated
+#   event: pass_complete   — an incremental or final extraction pass finished
+#   event: done            — coordinator loop has exited
+#   event: error           — a fatal error in the coordinator
+#
+# Connection stays open until `done` is received or the client disconnects.
+# A heartbeat comment is sent every 15s to keep proxies from timing out.
+
+def _build_snapshot(project_id: uuid.UUID) -> dict:
+    """Return the full current state for a project — same shape as `/parameters`.
+
+    Runs in its own short-lived DB session so we don't leak connections.
+    """
+    db = SessionLocal()
+    try:
+        project = db.query(Project).filter(Project.project_id == project_id).first()
+        if not project:
+            return {"error": "project not found"}
+
+        params = db.query(ExtractedParameter).filter(
+            ExtractedParameter.project_id == project_id
+        ).all()
+
+        param_payload = []
+        for p in params:
+            try:
+                all_sources = _json.loads(p.all_sources) if p.all_sources else []
+            except (ValueError, TypeError):
+                all_sources = []
+            param_payload.append({
+                "parameter_key": p.parameter_name,
+                "parameter_name": p.parameter_display_name,
+                "value": p.value_text,
+                "unit": p.unit,
+                "confidence": float(p.confidence_score) if p.confidence_score is not None else None,
+                "sources": all_sources,
+                "lifecycle_status": getattr(p, "lifecycle_status", None),
+                "change_count": getattr(p, "change_count", 0) or 0,
+                "history": getattr(p, "history", None),
+            })
+
+        docs = db.query(Document).filter(Document.project_id == project_id).all()
+        doc_payload = [
+            {
+                "document_id": str(d.document_id),
+                "filename": d.original_filename,
+                "file_type": d.file_type,
+                "processing_status": getattr(d, "processing_status", "pending"),
+            }
+            for d in docs
+        ]
+        indexed_count = sum(
+            1 for d in docs
+            if getattr(d, "processing_status", "") in ("indexed", "completed")
+        )
+
+        return {
+            "project_id": str(project_id),
+            "processing_status": project.processing_status,
+            "pipeline_step": getattr(project, "pipeline_step", None),
+            "parameters": param_payload,
+            "documents": doc_payload,
+            "indexed_count": indexed_count,
+            "total_count": len(docs),
+        }
+    finally:
+        db.close()
+
+
+def _sse_format(event_type: str, data: dict) -> str:
+    """Encode a single SSE message (event + data lines + terminator)."""
+    return f"event: {event_type}\ndata: {_json.dumps(data, default=str)}\n\n"
+
+
+@router.get("/projects/{project_id}/parameters/stream")
+async def stream_parameters(project_id: uuid.UUID):
+    """Server-Sent Events stream of live extraction progress for a project."""
+    # Validate project exists (short-lived session).
+    _probe = SessionLocal()
+    try:
+        exists = _probe.query(Project).filter(Project.project_id == project_id).first()
+        if not exists:
+            raise HTTPException(status_code=404, detail="Project not found")
+        project_status = exists.processing_status
+    finally:
+        _probe.close()
+
+    async def event_gen():
+        queue = event_bus.register_listener(project_id)
+        try:
+            # 1. Initial snapshot so the client has full state immediately.
+            snapshot = _build_snapshot(project_id)
+            yield _sse_format("snapshot", snapshot)
+
+            # If the project is already finished, emit `done` and close — the
+            # client doesn't need to wait for any live events.
+            if project_status in ("completed", "failed"):
+                yield _sse_format("done", {"reason": "already_" + project_status})
+                return
+
+            # 2. Stream live events until `done` or client disconnect.
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    # Heartbeat comment — keeps connection alive through proxies.
+                    yield ": ping\n\n"
+                    continue
+
+                yield _sse_format(event["type"], event["payload"])
+                if event["type"] == "done":
+                    break
+        except asyncio.CancelledError:
+            # Client disconnected — nothing to do, cleanup happens in finally.
+            pass
+        finally:
+            event_bus.unregister_listener(project_id, queue)
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # disable nginx buffering
+        },
+    )
 
 
 @router.post("/projects/{project_id}/re-extract", status_code=202)

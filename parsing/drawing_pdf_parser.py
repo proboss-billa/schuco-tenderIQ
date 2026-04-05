@@ -35,7 +35,9 @@ from google import genai
 from google.genai import types
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 
-from parsing.mistral_ocr import MistralOCRClient, LOW_YIELD_THRESHOLD
+# Mistral OCR is imported lazily inside _get_mistral() so the parser still
+# loads in environments where the `mistralai` package isn't installed.
+LOW_YIELD_THRESHOLD = 200
 
 logger = logging.getLogger(__name__)
 
@@ -132,16 +134,30 @@ class DrawingPDFParser:
             ocr_engine = "auto"
         self.ocr_engine = ocr_engine
         self.gemini = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-        # Mistral OCR client — lazily initialized (may fail if key missing)
-        self._mistral: MistralOCRClient | None = None
+        # Mistral OCR client — lazily initialized (may fail if key/package missing)
+        self._mistral = None
+        self._mistral_tried = False
 
-    def _get_mistral(self) -> MistralOCRClient | None:
-        """Return Mistral OCR client, or None if unavailable."""
+    def _get_mistral(self):
+        """Return Mistral OCR client, or None if unavailable.
+
+        Import is deferred so a missing `mistralai` package or missing API key
+        only disables Mistral — it does not break the whole parser.
+        """
         if self._mistral is not None:
             return self._mistral
+        if self._mistral_tried:
+            return None
+        self._mistral_tried = True
         try:
+            from parsing.mistral_ocr import MistralOCRClient
             self._mistral = MistralOCRClient()
             return self._mistral
+        except ImportError as e:
+            logger.warning(
+                f"[HYBRID_PDF] Mistral OCR package not installed ({e}) — using Gemini only"
+            )
+            return None
         except Exception as e:
             logger.warning(
                 f"[HYBRID_PDF] Mistral OCR unavailable ({e}) — using Gemini only"
