@@ -52,11 +52,12 @@ CHUNK_OVERLAP = 64
 class DocumentProcessor:
     """Main processing orchestrator"""
 
-    def __init__(self, project_id: uuid.UUID, db_session, pinecone_index, embedding_client):
+    def __init__(self, project_id: uuid.UUID, db_session, pinecone_index, embedding_client, ocr_engine: str = "auto"):
         self.project_id = project_id
         self.db = db_session
         self.pinecone = pinecone_index
         self.embedder = embedding_client
+        self.ocr_engine = ocr_engine  # "auto" | "mistral" | "gemini"
         self.gemini_llm_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
         self.anthropic_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
@@ -676,7 +677,7 @@ class DocumentProcessor:
                 )
                 document.file_type = 'pdf_drawing'
             from parsing.drawing_pdf_parser import DrawingPDFParser
-            return DrawingPDFParser()
+            return DrawingPDFParser(ocr_engine=self.ocr_engine)
         else:
             logger.info(
                 f"[AUTO-DETECT] {file_path}: avg {avg:.0f} chars/page "
@@ -738,7 +739,7 @@ class DocumentProcessor:
             # image pages (<100 chars) → Gemini Vision with adaptive prompt
             #   (auto-detects drawings vs scanned text vs tables vs forms)
             from parsing.drawing_pdf_parser import DrawingPDFParser
-            parser = DrawingPDFParser()
+            parser = DrawingPDFParser(ocr_engine=self.ocr_engine)
             parsed_content, page_count, parse_stats = parser.parse_with_page_count(document.file_path)
             document.page_count = page_count
 

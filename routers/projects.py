@@ -120,6 +120,11 @@ async def process_project(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     model: Optional[str] = Query(None, description="Model key for extraction"),
+    ocr_engine: Optional[str] = Query(
+        "auto",
+        description="OCR engine for image pages: 'auto' (Mistral + Gemini fallback), "
+                    "'mistral' (Mistral only, fastest), 'gemini' (Gemini only, thorough)",
+    ),
 ):
     project = db.query(Project).filter(Project.project_id == project_id).first()
     if not project:
@@ -134,18 +139,24 @@ async def process_project(
     # Validate model key if provided
     model_key = model if model and model in AVAILABLE_MODELS else None
 
+    # Validate OCR engine choice
+    ocr_choice = ocr_engine if ocr_engine in ("auto", "mistral", "gemini") else "auto"
+
     # Mark as processing immediately and return -- pipeline runs in background
     project.processing_status = "processing"
     project.processing_started_at = datetime.now()
     project.error_message = None  # clear previous errors
     db.commit()
 
-    background_tasks.add_task(_run_pipeline, project_id, model_key=model_key)
+    background_tasks.add_task(
+        _run_pipeline, project_id, model_key=model_key, ocr_engine=ocr_choice
+    )
 
     return {
         "project_id": str(project_id),
         "status": "processing",
         "model": model_key or DEFAULT_MODEL,
+        "ocr_engine": ocr_choice,
         "message": "Processing started. Poll /projects/{project_id} for status.",
     }
 

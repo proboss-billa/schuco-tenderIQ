@@ -118,9 +118,19 @@ Include ALL numbers, dimensions, codes, and text — do not summarize or skip va
 
 
 class DrawingPDFParser:
-    """Universal hybrid PDF parser: text extraction + tables + Gemini Vision."""
+    """Universal hybrid PDF parser: text extraction + tables + Mistral OCR + Gemini Vision.
 
-    def __init__(self):
+    ocr_engine controls the image-page OCR strategy:
+      • "auto"    — Mistral OCR first, Gemini fallback for low-yield pages (default, best balance)
+      • "mistral" — Mistral OCR only (fastest; may miss dense drawing annotations)
+      • "gemini"  — Gemini Vision only (slowest; richest drawing extraction)
+    """
+
+    def __init__(self, ocr_engine: str = "auto"):
+        if ocr_engine not in ("auto", "mistral", "gemini"):
+            logger.warning(f"[HYBRID_PDF] Unknown ocr_engine '{ocr_engine}' — defaulting to 'auto'")
+            ocr_engine = "auto"
+        self.ocr_engine = ocr_engine
         self.gemini = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
         # Mistral OCR client — lazily initialized (may fail if key missing)
         self._mistral: MistralOCRClient | None = None
@@ -376,6 +386,18 @@ class DrawingPDFParser:
         mistral_pages: Dict[int, str] = {}
         fallback_indices: List[int] = []
 
+        # ── Gemini-only mode: skip Mistral entirely ──────────────────────
+        if self.ocr_engine == "gemini":
+            logger.info(
+                f"[HYBRID_PDF] OCR engine=gemini — processing {total_vision} pages with Gemini"
+            )
+            self._process_with_gemini(
+                fitz_doc, vision_page_indices, render_dpi, vision_results, start_time
+            )
+            elapsed = time.time() - start_time
+            logger.info(f"[HYBRID_PDF] Vision processing complete in {elapsed:.0f}s")
+            return
+
         # ── Tier 1: Mistral OCR (single batch call) ──────────────────────
         mistral = self._get_mistral()
         if mistral is not None:
@@ -396,21 +418,34 @@ class DrawingPDFParser:
                 mistral_pages = {}
 
         # ── Classify Mistral results: keep high-yield, queue low-yield ───
+        # In "mistral" mode, accept any non-empty result and skip Gemini fallback.
+        mistral_only = (self.ocr_engine == "mistral")
+        effective_threshold = 1 if mistral_only else LOW_YIELD_THRESHOLD
+
         for page_idx in vision_page_indices:
             markdown = mistral_pages.get(page_idx, "")
-            if len(markdown.strip()) >= LOW_YIELD_THRESHOLD:
-                # Mistral got good content — classify as spec/table based on markdown structure
+            if len(markdown.strip()) >= effective_threshold:
+                # Mistral got content — classify as spec/table based on markdown structure
                 page_type = _classify_mistral_markdown(markdown)
                 vision_results[page_idx] = (page_type, markdown)
-            else:
-                # Low yield — likely a drawing. Queue for Gemini fallback.
+            elif not mistral_only:
+                # Low yield in auto mode — likely a drawing. Queue for Gemini fallback.
                 fallback_indices.append(page_idx)
+            else:
+                # Mistral-only mode: accept even empty results (mark as blank)
+                vision_results[page_idx] = ("F", "")
 
         if mistral_pages:
-            logger.info(
-                f"[HYBRID_PDF] Mistral high-yield: {len(vision_results)} pages, "
-                f"fallback to Gemini: {len(fallback_indices)} pages"
-            )
+            if mistral_only:
+                logger.info(
+                    f"[HYBRID_PDF] Mistral-only: {len(vision_results)} pages processed "
+                    f"(no Gemini fallback)"
+                )
+            else:
+                logger.info(
+                    f"[HYBRID_PDF] Mistral high-yield: {len(vision_results)} pages, "
+                    f"fallback to Gemini: {len(fallback_indices)} pages"
+                )
 
         # ── Tier 2: Gemini Vision fallback for low-yield pages ───────────
         if fallback_indices:

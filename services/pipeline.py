@@ -56,15 +56,15 @@ async def _wait_for_pinecone_doc(project_id: str, document_id: str, timeout: int
     return False
 
 
-async def _run_pipeline(project_id: uuid.UUID, model_key: str = None):
+async def _run_pipeline(project_id: uuid.UUID, model_key: str = None, ocr_engine: str = "auto"):
     """Queuing wrapper -- acquires global pipeline slot, then delegates to inner."""
     _timing_project_id.set(str(project_id))
     _pipeline_log.info(f"[PIPELINE] Queued project {project_id} -- waiting for pipeline slot...")
     async with _PIPELINE_SEMAPHORE:
-        await _run_pipeline_inner(project_id, model_key=model_key)
+        await _run_pipeline_inner(project_id, model_key=model_key, ocr_engine=ocr_engine)
 
 
-async def _run_pipeline_inner(project_id: uuid.UUID, model_key: str = None):
+async def _run_pipeline_inner(project_id: uuid.UUID, model_key: str = None, ocr_engine: str = "auto"):
     """Background task: per-document parse -> embed -> extract parameters.
 
     Architecture
@@ -106,6 +106,7 @@ async def _run_pipeline_inner(project_id: uuid.UUID, model_key: str = None):
             db_session=db,
             pinecone_index=pinecone_index,
             embedding_client=embedding_client,
+            ocr_engine=ocr_engine,
         )
 
         # ── Process BOQ documents (no LLM extraction needed) ─────────────────
@@ -170,6 +171,7 @@ async def _run_pipeline_inner(project_id: uuid.UUID, model_key: str = None):
                         db_session=doc_session,
                         pinecone_index=pinecone_index,
                         embedding_client=embedding_client,
+                        ocr_engine=ocr_engine,
                     )
 
                     loop = asyncio.get_event_loop()
