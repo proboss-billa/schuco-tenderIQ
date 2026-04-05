@@ -258,7 +258,11 @@ class ParameterExtractor:
     # PASS 1: FULL-CONTEXT EXTRACTION (like Claude Web — zero retrieval loss)
     # ══════════════════════════════════════════════════════════════════════════
 
-    def _fetch_all_parent_chunks(self, project_id: str) -> List[Dict]:
+    def _fetch_all_parent_chunks(
+        self,
+        project_id: str,
+        document_ids: Optional[set] = None,
+    ) -> List[Dict]:
         """Fetch ALL level-0 parent chunks for a project from ALL document types.
 
         Level-0 parents are created for:
@@ -268,6 +272,10 @@ class ParameterExtractor:
 
         If no level-0 parents exist (legacy data), falls back to level-1 children.
 
+        When ``document_ids`` is provided, only chunks belonging to those
+        documents are returned — used by streaming incremental passes to
+        process only newly-indexed docs without re-scanning the whole corpus.
+
         Returns chunks interleaved by document to ensure all document types
         get fair representation across context windows (no document is bunched
         at the end where it might be ignored).
@@ -275,30 +283,38 @@ class ParameterExtractor:
         from models.document import Document
 
         # 1. Fetch ALL level-0 parents (specs, drawings, docx, BOQ — all have them now)
-        all_parents = (
+        base_q = (
             self.db.query(DocumentChunk)
             .options(joinedload(DocumentChunk.document))
             .filter(
                 DocumentChunk.project_id == project_id,
                 DocumentChunk.chunk_level == 0,
             )
-            .order_by(DocumentChunk.document_id, DocumentChunk.page_number)
-            .all()
         )
+        if document_ids:
+            base_q = base_q.filter(DocumentChunk.document_id.in_(list(document_ids)))
+        all_parents = base_q.order_by(
+            DocumentChunk.document_id, DocumentChunk.page_number
+        ).all()
 
         if not all_parents:
             # Fallback: if no level-0 parents exist (legacy data), fetch all level-1 children
             logger.warning(f"[FULL_CONTEXT] No level-0 parents found — falling back to level-1 children")
-            all_parents = (
+            fallback_q = (
                 self.db.query(DocumentChunk)
                 .options(joinedload(DocumentChunk.document))
                 .filter(
                     DocumentChunk.project_id == project_id,
                     DocumentChunk.chunk_level == 1,
                 )
-                .order_by(DocumentChunk.document_id, DocumentChunk.page_number)
-                .all()
             )
+            if document_ids:
+                fallback_q = fallback_q.filter(
+                    DocumentChunk.document_id.in_(list(document_ids))
+                )
+            all_parents = fallback_q.order_by(
+                DocumentChunk.document_id, DocumentChunk.page_number
+            ).all()
             return [self._chunk_to_dict(p, score=1.0) for p in all_parents]
 
         # 2. Interleave chunks from different documents for balanced representation.
@@ -441,19 +457,24 @@ Return ONLY valid JSON — one key per parameter:
         self,
         project_id: str,
         facade_parameters: List[Dict],
+        document_ids_filter: Optional[set] = None,
     ) -> List[Dict]:
         """Pass 1: Full-context extraction — send ALL document text to the LLM.
 
         Fetches all parent chunks from PostgreSQL (no Pinecone), splits into
         context windows, and makes one LLM call per window with ALL parameters.
         Merges results across windows keeping highest-confidence per param.
+
+        ``document_ids_filter`` narrows the fetch to only chunks from those
+        documents — used by streaming per-document incremental passes.
         """
         t_start = time.perf_counter()
         loop = asyncio.get_running_loop()
 
         # ── Fetch all parent chunks from DB ──
         parent_dicts = await loop.run_in_executor(
-            None, self._fetch_all_parent_chunks, project_id
+            None,
+            lambda: self._fetch_all_parent_chunks(project_id, document_ids_filter),
         )
         total_tokens = sum(self._estimate_tokens(c['chunk_text']) for c in parent_dicts)
         logger.info(
@@ -483,8 +504,11 @@ Return ONLY valid JSON — one key per parameter:
                 for i in range(0, len(facade_parameters), param_batch_size)
             ]
 
-            all_window_results = []
-            for batch_idx, param_batch in enumerate(param_batches):
+            # Run all param-batches inside a window in parallel. Each batch
+            # still acquires the module-level LLM semaphore individually, so
+            # this can't exceed the global concurrency ceiling — it just lets
+            # a window's batches race instead of waiting for each other.
+            async def _run_one_batch(batch_idx: int, param_batch: List[Dict]) -> List[Dict]:
                 batch_label = f"Window {window_idx+1}/{len(windows)} batch {batch_idx+1}/{len(param_batches)}"
                 t0 = time.perf_counter()
                 try:
@@ -497,18 +521,16 @@ Return ONLY valid JSON — one key per parameter:
                         )
                 except asyncio.TimeoutError:
                     logger.error(f"[FULL_CONTEXT] {batch_label} timed out (240s)")
-                    all_window_results.extend([
+                    return [
                         {'parameter_name': p['name'], 'found': False, 'reason': 'LLM timeout'}
                         for p in param_batch
-                    ])
-                    continue
+                    ]
                 except Exception as e:
                     logger.error(f"[FULL_CONTEXT] {batch_label} LLM error: {e}")
-                    all_window_results.extend([
+                    return [
                         {'parameter_name': p['name'], 'found': False, 'reason': f'LLM error: {e}'}
                         for p in param_batch
-                    ])
-                    continue
+                    ]
 
                 elapsed = time.perf_counter() - t0
                 logger.info(
@@ -561,9 +583,12 @@ Return ONLY valid JSON — one key per parameter:
                         except Exception as e:
                             logger.warning(f"[FULL_CONTEXT] {batch_label} — retry failed: {e}")
 
-                all_window_results.extend(results)
+                return results
 
-            return all_window_results
+            batch_results_list = await asyncio.gather(
+                *[_run_one_batch(i, b) for i, b in enumerate(param_batches)]
+            )
+            return [r for batch_results in batch_results_list for r in batch_results]
 
         window_tasks = [
             _process_window(i, w) for i, w in enumerate(windows)
@@ -1196,6 +1221,8 @@ If found=false, explanation must clearly state: what terms were searched, what (
         max_concurrent: int = 6,
         num_docs: int = 1,
         skip_vector_fallback: bool = False,
+        document_ids_filter: Optional[set] = None,
+        skip_persist_not_found: bool = False,
     ) -> List[Dict]:
         """Extract parameters using a three-pass strategy for maximum accuracy.
 
@@ -1240,7 +1267,7 @@ If found=false, explanation must clearly state: what terms were searched, what (
 
         # ═══════════ PASS 1: Full-context extraction ═══════════
         all_results = await self._extract_full_context_async(
-            project_id, facade_parameters
+            project_id, facade_parameters, document_ids_filter=document_ids_filter
         )
         pass1_found = sum(1 for r in all_results if r.get('found'))
         logger.info(
@@ -1305,7 +1332,15 @@ If found=false, explanation must clearly state: what terms were searched, what (
             param_config = param_map.get(pname)
             if param_config:
                 try:
-                    self._store_extraction(project_id, param_config, result)
+                    # When running on a narrow doc subset, skip persisting
+                    # not-found results — the doc we're looking at simply may
+                    # not mention this param, but a later wider pass might.
+                    # Overwriting a previously-found value with not-found
+                    # would lose real data.
+                    if skip_persist_not_found and not result.get('found'):
+                        pass
+                    else:
+                        self._store_extraction(project_id, param_config, result)
                     if result.get('found'):
                         found_count += 1
                 except Exception as e:
@@ -1405,6 +1440,7 @@ If found=false, explanation must clearly state: what terms were searched, what (
         facade_parameters: List[Dict],
         is_final: bool = False,
         on_param_update=None,
+        new_document_ids: Optional[set] = None,
     ) -> Dict:
         """Run an incremental (or final) parameter extraction pass.
 
@@ -1458,9 +1494,24 @@ If found=false, explanation must clearly state: what terms were searched, what (
         )
 
         # ── 1. Compute current evidence fingerprint ─────────────────────────
+        # Always use the FULL corpus for fingerprint computation so lifecycle
+        # decisions are based on the complete state, not just the narrow slice
+        # being extracted this pass.
         parent_chunks = await asyncio.get_event_loop().run_in_executor(
             None, self._fetch_all_parent_chunks, project_id
         )
+        # Narrow fetch (only new docs) drives extraction context below.
+        narrow_parent_chunks = parent_chunks
+        if new_document_ids and not is_final:
+            narrow_parent_chunks = [
+                c for c in parent_chunks
+                if c.get("document_id") in new_document_ids
+            ]
+            logger.info(
+                f"[EXTRACT_INCREMENTAL] Narrow-scope extraction: "
+                f"{len(narrow_parent_chunks)}/{len(parent_chunks)} chunks "
+                f"from {len(new_document_ids)} new docs"
+            )
         chunk_ids = [c.get("chunk_id") for c in parent_chunks if c.get("chunk_id")]
         current_fingerprint = ExtractedParameter.compute_fingerprint(chunk_ids)
 
@@ -1550,14 +1601,20 @@ If found=false, explanation must clearly state: what terms were searched, what (
         new_list: List[str] = []
         extractions: List[Dict] = []
         if to_extract:
+            narrow_run = bool(new_document_ids) and not is_final
             extractions = await self.extract_all_parameters_async(
                 project_id=project_id,
                 facade_parameters=to_extract,
                 max_concurrent=10,
-                num_docs=len({c.get("document_id") for c in parent_chunks if c.get("document_id")}) or 1,
+                num_docs=len({c.get("document_id") for c in narrow_parent_chunks if c.get("document_id")}) or 1,
                 # Incremental passes skip Pass 2 vector fallback — the final
                 # pass will run it once the entire corpus is indexed.
                 skip_vector_fallback=not is_final,
+                # Scope LLM context to newly-arrived docs on narrow passes.
+                document_ids_filter=(new_document_ids if narrow_run else None),
+                # Don't clobber previously-found values with not-found when
+                # the new doc simply doesn't mention that param.
+                skip_persist_not_found=narrow_run,
             )
 
         # ── 6. Merge results + update lifecycle fields ──────────────────────

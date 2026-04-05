@@ -126,13 +126,15 @@ async def _run_pipeline_inner(project_id: uuid.UUID, model_key: str = None, ocr_
         # ── Process BOQ documents (no LLM extraction needed) ─────────────────
         boq_pinecone_tasks = []
 
-        async def _boq_notify_when_ready(doc_id: str, doc_name: str):
+        async def _boq_notify_when_ready(doc_id: str, doc_name: str, file_type: str = "excel_boq"):
             """Background task: await Pinecone sync, then notify coordinator."""
             ready = await _wait_for_pinecone_doc(
                 str(project_id), doc_id, timeout=120
             )
             if ready and coordinator is not None:
-                await coordinator.notify_doc_indexed(doc_id, filename=doc_name)
+                await coordinator.notify_doc_indexed(
+                    doc_id, filename=doc_name, file_type=file_type
+                )
             return ready
 
         for doc in boq_docs:
@@ -150,7 +152,11 @@ async def _run_pipeline_inner(project_id: uuid.UUID, model_key: str = None, ocr_
                 # Fire Pinecone wait + coordinator notify as a single task
                 boq_pinecone_tasks.append(
                     asyncio.create_task(
-                        _boq_notify_when_ready(str(doc.document_id), doc.original_filename)
+                        _boq_notify_when_ready(
+                            str(doc.document_id),
+                            doc.original_filename,
+                            file_type=doc.file_type or "excel_boq",
+                        )
                     )
                 )
             except Exception as e:
@@ -216,12 +222,20 @@ async def _run_pipeline_inner(project_id: uuid.UUID, model_key: str = None, ocr_
                     # Fire Pinecone wait + coordinator notify in a single task
                     # so streaming extraction can start on this doc immediately,
                     # without blocking other docs still parsing.
-                    async def _wait_and_notify(_doc_id=str(doc_id), _doc_name=doc_name):
+                    _doc_file_type = doc_local.file_type or "other"
+
+                    async def _wait_and_notify(
+                        _doc_id=str(doc_id),
+                        _doc_name=doc_name,
+                        _file_type=_doc_file_type,
+                    ):
                         ready = await _wait_for_pinecone_doc(
                             str(project_id), _doc_id, timeout=180
                         )
                         if ready and coordinator is not None:
-                            await coordinator.notify_doc_indexed(_doc_id, filename=_doc_name)
+                            await coordinator.notify_doc_indexed(
+                                _doc_id, filename=_doc_name, file_type=_file_type
+                            )
                         return ready
 
                     wait_task = asyncio.create_task(_wait_and_notify())
