@@ -1195,12 +1195,18 @@ If found=false, explanation must clearly state: what terms were searched, what (
         facade_parameters: List[Dict],
         max_concurrent: int = 6,
         num_docs: int = 1,
+        skip_vector_fallback: bool = False,
     ) -> List[Dict]:
         """Extract parameters using a three-pass strategy for maximum accuracy.
 
         Pass 1: FULL CONTEXT — send ALL document text, extract ALL params (like Claude Web)
         Pass 2: VECTOR SEARCH — targeted Pinecone search for still-missing params
         Pass 3: STORE — merge and persist all results
+
+        When ``skip_vector_fallback`` is True, Pass 2 is skipped — used by
+        streaming incremental passes where the corpus isn't complete yet
+        and vector fallback would waste an entire round of LLM calls only
+        to be re-run on the final pass.
         """
         t_all_start = time.perf_counter()
         logger.info(
@@ -1245,6 +1251,13 @@ If found=false, explanation must clearly state: what terms were searched, what (
         # ═══════════ PASS 2: Vector-search fallback for not-found params ═══════════
         not_found_names = {r['parameter_name'] for r in all_results if not r.get('found')}
         retry_params = [p for p in facade_parameters if p['name'] in not_found_names]
+
+        if skip_vector_fallback and retry_params:
+            logger.info(
+                f"[EXTRACT_ALL] Skipping Pass 2 vector fallback ({len(retry_params)} missing) — "
+                f"will be retried on the final pass"
+            )
+            retry_params = []
 
         if retry_params:
             logger.info(
@@ -1542,6 +1555,9 @@ If found=false, explanation must clearly state: what terms were searched, what (
                 facade_parameters=to_extract,
                 max_concurrent=10,
                 num_docs=len({c.get("document_id") for c in parent_chunks if c.get("document_id")}) or 1,
+                # Incremental passes skip Pass 2 vector fallback — the final
+                # pass will run it once the entire corpus is indexed.
+                skip_vector_fallback=not is_final,
             )
 
         # ── 6. Merge results + update lifecycle fields ──────────────────────

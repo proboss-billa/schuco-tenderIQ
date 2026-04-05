@@ -54,9 +54,20 @@ from services import event_bus
 logger = logging.getLogger(__name__)
 
 # Coalesce doc-indexed events within this many seconds into a single pass.
-_DEBOUNCE_SECONDS = 5.0
-# Hard cap on incremental passes (excludes the final pass).
-_MAX_INCREMENTAL_RUNS = 10
+# 12s is long enough to batch a typical burst of nearly-simultaneous indexing
+# completions (PDF parse + embed is usually within a few seconds of siblings)
+# without making the UI feel frozen.
+_DEBOUNCE_SECONDS = 12.0
+# Hard cap on incremental passes (excludes the final pass). Each pass runs
+# the full extraction engine, so going higher than 2 quickly destroys the
+# throughput benefit of streaming — the LLM sees mostly the same context
+# over and over. Two incremental passes + one final pass = at most 3 runs.
+_MAX_INCREMENTAL_RUNS = 2
+# Do not fire the first incremental pass until at least this many documents
+# have finished indexing. With just one doc indexed there usually isn't
+# enough cross-document context for extraction to be meaningful, so we'd
+# only be paying the LLM cost to re-run shortly after.
+_MIN_DOCS_BEFORE_FIRST_PASS = 2
 
 
 @dataclass
@@ -146,6 +157,23 @@ class ExtractionCoordinator:
                         f"[COORDINATOR {self.state.project_id[:8]}] "
                         f"Hit incremental run cap ({_MAX_INCREMENTAL_RUNS}) — "
                         f"waiting for final pass"
+                    )
+                    self._pending_event.clear()
+                    continue
+
+                # Don't fire the very first incremental pass until we have
+                # enough documents to make extraction worthwhile. A single
+                # indexed doc rarely contains cross-document evidence we'd
+                # commit to anyway, and running the extractor on it just to
+                # re-run a few seconds later wastes an entire LLM round trip.
+                if (
+                    self.state.runs_done == 0
+                    and len(self.state.indexed_doc_ids) < _MIN_DOCS_BEFORE_FIRST_PASS
+                ):
+                    logger.info(
+                        f"[COORDINATOR {self.state.project_id[:8]}] "
+                        f"Waiting for ≥{_MIN_DOCS_BEFORE_FIRST_PASS} docs before first pass "
+                        f"(have {len(self.state.indexed_doc_ids)})"
                     )
                     self._pending_event.clear()
                     continue
