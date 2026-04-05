@@ -36,7 +36,12 @@ logger = logging.getLogger("tenderiq.main")
 
 app = FastAPI(title="Tender Analysis POC API", debug=True)
 
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+# Default dev origins: CRA (3000), Vite (5173), Vite preview (4173). Override
+# via ALLOWED_ORIGINS env var for staging/prod.
+ALLOWED_ORIGINS = os.getenv(
+    "ALLOWED_ORIGINS",
+    "http://localhost:3000,http://localhost:5173,http://localhost:4173,http://127.0.0.1:5173",
+).split(",")
 
 app.add_middleware(
     CORSMiddleware,
