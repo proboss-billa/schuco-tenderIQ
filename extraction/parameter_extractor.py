@@ -1223,12 +1223,11 @@ documents" if truly absent."""
         max_concurrent: int = 6,
         num_docs: int = 1,
     ) -> List[Dict]:
-        """Extract parameters using vector search + persist.
+        """Extract parameters using a three-pass strategy for maximum accuracy.
 
-        Pass 1: VECTOR SEARCH — per-param Pinecone search, batched LLM calls.
-                (Formerly a fallback behind full-context extraction; full-context
-                is disabled — vector search handles every param directly.)
-        Pass 2: STORE — persist all results.
+        Pass 1: VECTOR SEARCH — per-param Pinecone search, batched LLM calls (primary pass)
+        Pass 2: FULL CONTEXT — fallback for params vector search didn't find
+        Pass 3: STORE — merge and persist all results
         """
         t_all_start = time.perf_counter()
         logger.info(
@@ -1260,60 +1259,78 @@ documents" if truly absent."""
         except Exception as e:
             logger.warning(f"[EXTRACT_ALL] Could not create extraction run record: {e}")
 
-        # ═══════════ PASS 1: Vector-search fallback for not-found params ═══════════
-        # Full-context extraction is disabled; seed every param as not-found so
-        # the vector-search pass below handles all of them uniformly. pass1_found
-        # stays 0 in the run stats — pass2_recovered becomes the true found count.
+        # ═══════════ PASS 1: Vector search — primary extraction for all params ═══════════
         all_results = [
             {'parameter_name': p['name'], 'found': False, 'reason': 'Pending vector search'}
             for p in facade_parameters
         ]
-        pass1_found = 0
+
+        # Small batches keep per-param context focused; concurrency is bounded
+        # by the semaphore, not the batch count.
+        pass1_batch_size = 5
+        pass1_batches = [
+            facade_parameters[i:i + pass1_batch_size]
+            for i in range(0, len(facade_parameters), pass1_batch_size)
+        ]
+        semaphore = asyncio.Semaphore(max_concurrent)
+        pass1_tasks = [
+            self._extract_batch_async(project_id, batch, semaphore, num_docs)
+            for batch in pass1_batches
+        ]
+        pass1_results_raw = await asyncio.gather(*pass1_tasks, return_exceptions=True)
+
+        pass1_map: Dict[str, Dict] = {}
+        for pb, pr in zip(pass1_batches, pass1_results_raw):
+            if isinstance(pr, Exception):
+                logger.error(f"[EXTRACT_ALL] Pass 1 batch exception: {pr}")
+                continue
+            for r in pr:
+                if r.get('found'):
+                    pass1_map[r['parameter_name']] = r
+
+        for i, result in enumerate(all_results):
+            pname = result.get('parameter_name')
+            if pname in pass1_map:
+                all_results[i] = pass1_map[pname]
+
+        pass1_found = sum(1 for r in all_results if r.get('found'))
         logger.info(
-            f"[EXTRACT_ALL] Full-context pass skipped — routing all "
-            f"{len(facade_parameters)} params through vector search"
+            f"[EXTRACT_ALL] Pass 1 (vector search): {pass1_found}/{len(all_results)} found — "
+            f"{time.perf_counter()-t_all_start:.2f}s"
         )
 
+        # ═══════════ PASS 2: Full-context fallback for not-found params ═══════════
         not_found_names = {r['parameter_name'] for r in all_results if not r.get('found')}
-        retry_params = [p for p in facade_parameters if p['name'] in not_found_names]
+        missing_params = [p for p in facade_parameters if p['name'] in not_found_names]
 
-        if retry_params:
+        if missing_params:
             logger.info(
-                f"[EXTRACT_ALL] Vector search: {len(retry_params)} params"
+                f"[EXTRACT_ALL] Pass 2 (full context): {len(missing_params)} not-found params"
             )
-            # Use smaller batch size for more focused context per param
-            retry_batch_size = 5
-            retry_batches = [
-                retry_params[i:i + retry_batch_size]
-                for i in range(0, len(retry_params), retry_batch_size)
-            ]
-            semaphore = asyncio.Semaphore(max_concurrent)
-            retry_tasks = [
-                self._extract_batch_async(project_id, batch, semaphore, num_docs)
-                for batch in retry_batches
-            ]
-            retry_results_raw = await asyncio.gather(*retry_tasks, return_exceptions=True)
-
-            # Merge: override not-found with found from vector search
-            retry_map: Dict[str, Dict] = {}
-            for rb, rr in zip(retry_batches, retry_results_raw):
-                if isinstance(rr, Exception):
-                    logger.error(f"[EXTRACT_ALL] Vector-search batch exception: {rr}")
-                    continue
-                for r in rr:
-                    if r.get('found'):
-                        retry_map[r['parameter_name']] = r
-
-            if retry_map:
-                logger.info(
-                    f"[EXTRACT_ALL] Vector search recovered {len(retry_map)} params"
+            try:
+                fallback_results = await self._extract_full_context_async(
+                    project_id, missing_params
                 )
+            except Exception as e:
+                logger.error(f"[EXTRACT_ALL] Pass 2 full-context exception: {e}")
+                fallback_results = []
+
+            fallback_map = {
+                r['parameter_name']: r
+                for r in fallback_results
+                if r.get('found')
+            }
+            if fallback_map:
                 for i, result in enumerate(all_results):
                     pname = result.get('parameter_name')
-                    if pname in retry_map:
-                        all_results[i] = retry_map[pname]
+                    if pname in fallback_map:
+                        all_results[i] = fallback_map[pname]
+                logger.info(
+                    f"[EXTRACT_ALL] Pass 2 recovered {len(fallback_map)} params: "
+                    f"{list(fallback_map.keys())}"
+                )
 
-        # ═══════════ PASS 2: Persist ALL results (found + not-found) ═══════════
+        # ═══════════ PASS 3: Persist ALL results (found + not-found) ═══════════
         found_count = 0
         store_failures = []
         param_map = {p['name']: p for p in facade_parameters}
