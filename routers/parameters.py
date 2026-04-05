@@ -42,15 +42,18 @@ async def get_extracted_parameters(project_id: uuid.UUID, db: Session = Depends(
         except (ValueError, TypeError):
             all_sources = []
 
-        # Back-fill all_sources from legacy fields if not present
-        if not all_sources and (param.source_document or pages):
+        # Back-fill all_sources from legacy fields if not present.
+        # Require BOTH doc_name AND pages — the old `or` branch surfaced the
+        # chunk_dicts[0] fallback bug (pre-fix extractions had source_document_id
+        # set to an arbitrary first-chunk doc even when the LLM didn't cite).
+        if not all_sources and param.source_document:
             doc_name = param.source_document.original_filename if param.source_document else None
-            if doc_name or pages:
+            if doc_name and pages:
                 all_sources = [{
                     "document_id": str(param.source_document_id) if param.source_document_id else None,
                     "document":    doc_name,
                     "pages":       pages,
-                    "section":     param.source_section,
+                    "sections":    [param.source_section] if param.source_section else [],
                 }]
 
         # Fetch source chunk text for "show evidence" in UI

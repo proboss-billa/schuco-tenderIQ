@@ -220,13 +220,24 @@ class ParameterExtractor:
         return sorted(enriched, key=lambda x: x['score'], reverse=True)
 
     def _parse_sources(self, source_numbers, chunk_dicts: List[Dict]) -> tuple:
-        """Return (source_metadata dict, all_sources list, all_pages list)."""
+        """Return (source_metadata dict, all_sources list, all_pages list).
+
+        If the LLM omits source_numbers (common on high-confidence Gemini
+        responses), returns empty source_meta / all_sources rather than
+        guessing chunk_dicts[0] — a plausible-but-wrong citation is worse
+        than an honest "not cited".
+        """
         try:
             idxs = [int(s) - 1 for s in (source_numbers or []) if str(s).isdigit()]
         except (ValueError, TypeError):
             idxs = []
 
-        primary = next((chunk_dicts[i] for i in idxs if 0 <= i < len(chunk_dicts)), chunk_dicts[0] if chunk_dicts else None)
+        primary = next((chunk_dicts[i] for i in idxs if 0 <= i < len(chunk_dicts)), None)
+        if primary is None and chunk_dicts:
+            logger.warning(
+                f"[SOURCES] LLM returned no valid source_numbers (raw={source_numbers!r}) "
+                f"— recording empty source_meta rather than guessing chunk_dicts[0]"
+            )
         source_meta = {}
         if primary:
             source_meta = {
@@ -245,9 +256,17 @@ class ParameterExtractor:
                 did = c['document_id']
                 pg  = c['page_number']
                 if did not in doc_sources:
-                    doc_sources[did] = {'document_id': did, 'document': c['document_name'], 'pages': [], 'section': c['section_title']}
+                    doc_sources[did] = {
+                        'document_id': did,
+                        'document':    c['document_name'],
+                        'pages':       [],
+                        'sections':    [],
+                    }
                 if pg is not None and pg not in doc_sources[did]['pages']:
                     doc_sources[did]['pages'].append(pg)
+                section = c['section_title']
+                if section and section not in doc_sources[did]['sections']:
+                    doc_sources[did]['sections'].append(section)
 
         all_sources = list(doc_sources.values())
         all_pages   = [pg for src in all_sources for pg in src['pages']]
@@ -414,7 +433,10 @@ RULES:
 - When uncertain between found and not-found → choose found=true with confidence 0.5-0.6 (let the user decide)
 - value: concise string with key sub-values
 - confidence: 0.9+ explicit, 0.7-0.9 inferred/derived, 0.5-0.7 partial/implied
-- source_numbers: list of source numbers [1,2,...] with relevant info — can span multiple documents
+- source_numbers: REQUIRED whenever found=true. The number is the leading
+  integer in each `[N|Doc|ROLE|p.X]` tag above (so `[3|GCC.pdf|...]` is 3).
+  Include EVERY tag you used — missing citations break downstream source tracking.
+  Return [] ONLY when found=false.
 - explanation: MAX 15 words — keep very brief to avoid response truncation
 - EVERY parameter MUST appear in output
 
@@ -639,7 +661,9 @@ EXTRACTION RULES:
 - found=true if ANY relevant data exists, even partial or implied
 - value = concise string with ALL relevant sub-values (e.g. "Zone IV, Z=0.24, I=1.2" or "8+16+8 IGU Low-E")
 - confidence: 0.9+ if explicitly stated, 0.7-0.9 if inferred, 0.5-0.7 if partial, <0.5 if uncertain
-- source_numbers: ALL source numbers [1,2,3...] that contain relevant info (can be multiple)
+- source_numbers: REQUIRED whenever found=true. The integer shown in each
+  `[Source N | Doc: ...]` tag above — list EVERY tag you pulled info from.
+  Missing citations break downstream source tracking. Return [] ONLY when found=false.
 - For yes/no parameters: value="Yes" or value="No" with evidence in explanation
 - Do NOT mark as not-found just because exact wording differs — use domain knowledge
 
@@ -865,8 +889,12 @@ Return ONLY JSON:
   "explanation": "brief explanation"
 }}
 
-Set found=true if ANY relevant information exists. Include all source numbers with relevant info.
-If found=false, explanation must clearly state: what terms were searched, what (if anything) was found nearby, and confirm "Not specified in documents" if truly absent."""
+Set found=true if ANY relevant information exists. source_numbers is REQUIRED
+whenever found=true — use the integer shown in each `[Source N | Doc: ...]` tag
+above, and include EVERY tag you used (missing citations break source tracking).
+If found=false, source_numbers=[], and explanation must clearly state: what terms
+were searched, what (if anything) was found nearby, and confirm "Not specified in
+documents" if truly absent."""
 
         system = (
             "You are an expert facade engineer. Your job is to FIND information — "
