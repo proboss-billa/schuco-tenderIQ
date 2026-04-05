@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import Boolean, Integer, String, Text, TIMESTAMP, func
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 import uuid
 
@@ -88,5 +88,23 @@ class Project(Base):
     extraction_runs_completed: Mapped[int] = mapped_column(
         Integer,
         default=0,
+        nullable=True,
+    )
+
+    # --- Persisted coordinator state (alembic 0004) ---
+    # Doc IDs the streaming extractor has already processed. Populated by
+    # `ExtractionCoordinator` after each pass. Reloaded on worker restart so
+    # the coordinator resumes where it left off instead of re-extracting.
+    extracted_doc_ids: Mapped[list] = mapped_column(
+        JSONB,
+        default=list,
+        nullable=True,
+    )
+
+    # Mapping of doc_id → file_type, used by the coordinator for priority
+    # ordering (BoQ/spec before drawings). Kept in sync with indexed docs.
+    doc_file_types: Mapped[dict] = mapped_column(
+        JSONB,
+        default=dict,
         nullable=True,
     )

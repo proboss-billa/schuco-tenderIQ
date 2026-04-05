@@ -159,6 +159,11 @@ class ExtractionCoordinator:
         await asyncio.get_event_loop().run_in_executor(
             None, self._backfill_legacy_lifecycle
         )
+        # Hydrate coordinator state from DB so a worker restart resumes where
+        # the previous run left off (no duplicate extraction work).
+        await asyncio.get_event_loop().run_in_executor(
+            None, self._hydrate_persisted_state
+        )
         try:
             while True:
                 # Wait for either a doc-indexed event or completion.
@@ -499,7 +504,7 @@ class ExtractionCoordinator:
         )
 
     def _bump_runs_completed(self) -> None:
-        """Persist run counter to DB (best-effort)."""
+        """Persist run counter + coordinator state to DB (best-effort)."""
         db = SessionLocal()
         try:
             project = db.query(Project).filter(
@@ -507,8 +512,45 @@ class ExtractionCoordinator:
             ).first()
             if project:
                 project.extraction_runs_completed = self.state.runs_done
+                # Snapshot coordinator state so a worker crash after this
+                # point won't re-extract already-processed docs.
+                project.extracted_doc_ids = sorted(self.state.extracted_doc_ids)
+                project.doc_file_types = dict(self.state.doc_file_types)
                 db.commit()
         except Exception as e:
             logger.warning(f"[COORDINATOR] Failed to bump runs counter: {e}")
+        finally:
+            db.close()
+
+    def _hydrate_persisted_state(self) -> None:
+        """Reload extracted_doc_ids + doc_file_types from DB on startup.
+
+        Lets the coordinator resume cleanly after a worker restart: any
+        docs already extracted in a previous run stay excluded from the
+        next incremental pass's new-doc set.
+        """
+        db = SessionLocal()
+        try:
+            project = db.query(Project).filter(
+                Project.project_id == self.state.project_id
+            ).first()
+            if not project:
+                return
+            persisted_ids = project.extracted_doc_ids or []
+            persisted_types = project.doc_file_types or {}
+            if persisted_ids:
+                self.state.extracted_doc_ids.update(str(d) for d in persisted_ids)
+            if persisted_types:
+                self.state.doc_file_types.update(
+                    {str(k): str(v) for k, v in persisted_types.items()}
+                )
+            if persisted_ids or persisted_types:
+                logger.info(
+                    f"[COORDINATOR {self.state.project_id[:8]}] "
+                    f"Hydrated state: {len(persisted_ids)} previously-extracted docs, "
+                    f"{len(persisted_types)} file-type hints"
+                )
+        except Exception as e:
+            logger.warning(f"[COORDINATOR] Failed to hydrate persisted state: {e}")
         finally:
             db.close()

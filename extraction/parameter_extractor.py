@@ -28,12 +28,23 @@ FULL_CONTEXT_OVERLAP       = 3         # parent chunks overlap between windows
 TOKENS_PER_WORD            = 1.35      # average tokens per word estimate
 FULL_CONTEXT_PARAM_BATCH   = 25        # max params per LLM call in full-context mode
 
-# Number of parallel parameter shards per extraction pass. Each shard runs
-# its own Pass 1 + Pass 2 on the same prefetched chunks and writes disjoint
-# rows, so they race safely under the project-level advisory lock. Keep
-# this small enough that (shards × windows × batches) stays within the
-# module-level LLM semaphore.
-SHARD_COUNT                = 4
+# Parallel parameter shards per extraction pass. Each shard runs its own
+# Pass 1 + Pass 2 on the same prefetched chunks and writes disjoint rows,
+# so they race safely under the project-level advisory lock. Adaptive:
+# small param lists get fewer shards (no point spawning 4 tasks for 20
+# params); large lists cap at MAX_SHARD_COUNT so we don't saturate the
+# LLM semaphore on any single pass.
+MIN_PARAMS_PER_SHARD       = 20
+MAX_SHARD_COUNT            = 6
+MIN_SHARD_COUNT            = 1
+
+
+def _compute_shard_count(n_params: int) -> int:
+    """Target ~MIN_PARAMS_PER_SHARD params per shard, bounded by [1, MAX]."""
+    if n_params <= 0:
+        return 1
+    target = max(MIN_SHARD_COUNT, n_params // MIN_PARAMS_PER_SHARD)
+    return min(target, MAX_SHARD_COUNT)
 
 # ── Module-level LLM rate limiter ─────────────────────────────────────────────
 # Caps total concurrent Anthropic calls across ALL simultaneous pipeline runs.
@@ -46,6 +57,44 @@ def _get_llm_semaphore() -> asyncio.Semaphore:
     if _LLM_SEMAPHORE is None:
         _LLM_SEMAPHORE = asyncio.Semaphore(14)
     return _LLM_SEMAPHORE
+
+
+# Hard ceiling on LLM calls per extract_all_parameters_async invocation.
+# Prevents a pathological project (huge doc × many retries × sharding)
+# from silently burning through the budget. Tripping the ceiling aborts
+# further LLM calls for this pass; not-yet-extracted params return with
+# `reason="budget ceiling hit"`. Tune via the EXTRACTION_LLM_CALL_CEILING
+# environment variable.
+import os as _os
+LLM_CALL_CEILING_PER_PASS = int(_os.environ.get("EXTRACTION_LLM_CALL_CEILING", "200"))
+
+
+class _BudgetExceeded(Exception):
+    """Raised internally when a pass exceeds LLM_CALL_CEILING_PER_PASS."""
+    pass
+
+
+class PassBudget:
+    """Per-pass LLM call counter with a hard ceiling.
+
+    Thread-safe (asyncio single-threaded) counter threaded through the
+    extractor via `self._current_budget`. Each LLM call increments the
+    counter and raises `_BudgetExceeded` once the ceiling is hit. The
+    budget is reset on every `extract_all_parameters_async` invocation.
+    """
+
+    def __init__(self, ceiling: int = LLM_CALL_CEILING_PER_PASS):
+        self.ceiling = ceiling
+        self.calls = 0
+        self.aborted = False
+
+    def check_and_increment(self, label: str = "") -> None:
+        self.calls += 1
+        if self.calls > self.ceiling:
+            self.aborted = True
+            raise _BudgetExceeded(
+                f"LLM call ceiling {self.ceiling} exceeded at call #{self.calls} ({label})"
+            )
 
 
 class ParameterExtractor:
@@ -527,6 +576,17 @@ Return ONLY valid JSON — one key per parameter:
             async def _run_one_batch(batch_idx: int, param_batch: List[Dict]) -> List[Dict]:
                 batch_label = f"Window {window_idx+1}/{len(windows)} batch {batch_idx+1}/{len(param_batches)}"
                 t0 = time.perf_counter()
+                # Budget guard: skip LLM call if the pass has already hit its ceiling.
+                budget = getattr(self, "_current_budget", None)
+                if budget is not None:
+                    try:
+                        budget.check_and_increment(batch_label)
+                    except _BudgetExceeded as be:
+                        logger.error(f"[FULL_CONTEXT] {batch_label} — {be}")
+                        return [
+                            {'parameter_name': p['name'], 'found': False, 'reason': 'budget ceiling hit'}
+                            for p in param_batch
+                        ]
                 try:
                     async with semaphore:
                         response_text = await asyncio.wait_for(
@@ -582,6 +642,13 @@ Return ONLY valid JSON — one key per parameter:
                                for r in results)
                     ]
                     if still_missing and len(still_missing) <= len(param_batch) * 0.6:
+                        # Budget guard for retry call
+                        if budget is not None:
+                            try:
+                                budget.check_and_increment(f"{batch_label} retry")
+                            except _BudgetExceeded as be:
+                                logger.error(f"[FULL_CONTEXT] {batch_label} retry skipped — {be}")
+                                return results
                         logger.info(f"[FULL_CONTEXT] {batch_label} — retrying {len(still_missing)} missing params")
                         try:
                             async with semaphore:
@@ -1116,6 +1183,15 @@ If found=false, explanation must clearly state: what terms were searched, what (
             max_sources = min(80, max(15, len(chunk_dicts)))
             context = self._build_context(chunk_dicts, max_sources=max_sources)
 
+            # ── Budget guard ──
+            budget = getattr(self, "_current_budget", None)
+            if budget is not None:
+                try:
+                    budget.check_and_increment(f"BATCH {batch_names[0]}")
+                except _BudgetExceeded as be:
+                    logger.error(f"[BATCH] Skipped — {be}")
+                    return [{'parameter_name': p['name'], 'found': False, 'reason': 'budget ceiling hit'} for p in batch_params]
+
             # ── LLM call — guarded by global rate limiter across all projects ──
             t0 = time.perf_counter()
             try:
@@ -1252,9 +1328,13 @@ If found=false, explanation must clearly state: what terms were searched, what (
         to be re-run on the final pass.
         """
         t_all_start = time.perf_counter()
+        # Reset per-pass LLM call budget. Every LLM call made through the
+        # extractor checks `self._current_budget` and aborts the pass if
+        # the ceiling is hit (default 200 calls; tune via env var).
+        self._current_budget = PassBudget(ceiling=LLM_CALL_CEILING_PER_PASS)
         logger.info(
             f"[EXTRACT_ALL] Starting 3-pass extraction for {len(facade_parameters)} params "
-            f"| {num_docs} docs"
+            f"| {num_docs} docs | budget ceiling={self._current_budget.ceiling}"
         )
 
         # ── Create extraction run record ──
@@ -1293,7 +1373,8 @@ If found=false, explanation must clearly state: what terms were searched, what (
         # systematically slower than others. Each shard runs its own
         # Pass 1 (full-context) and Pass 2 (vector fallback) against the
         # SAME prefetched chunks, concurrently under the LLM semaphore.
-        shards = [facade_parameters[i::SHARD_COUNT] for i in range(SHARD_COUNT)]
+        shard_count = _compute_shard_count(len(facade_parameters))
+        shards = [facade_parameters[i::shard_count] for i in range(shard_count)]
         shards = [s for s in shards if s]
         logger.info(
             f"[EXTRACT_ALL] Dispatching {len(facade_parameters)} params across "
@@ -1349,11 +1430,23 @@ If found=false, explanation must clearly state: what terms were searched, what (
                         retry_map.get(r['parameter_name'], r) for r in shard_results
                     ]
 
+            shard_duration = time.perf_counter() - t_shard
+            shard_found = sum(1 for r in shard_results if r.get('found'))
             logger.info(
                 f"[EXTRACT_ALL] Shard {shard_idx+1}/{len(shards)}: "
-                f"{sum(1 for r in shard_results if r.get('found'))}/{len(shard_params)} found "
-                f"(pass1: {shard_pass1_found}) — "
-                f"{time.perf_counter() - t_shard:.2f}s"
+                f"{shard_found}/{len(shard_params)} found (pass1: {shard_pass1_found}) — "
+                f"{shard_duration:.2f}s"
+            )
+            # Structured per-shard metric for log aggregators / dashboards.
+            logger.info(
+                "[METRICS][SHARD] "
+                f"project_id={project_id} "
+                f"shard={shard_idx+1}/{len(shards)} "
+                f"params={len(shard_params)} "
+                f"pass1_found={shard_pass1_found} "
+                f"final_found={shard_found} "
+                f"pass2_recovered={shard_found - shard_pass1_found} "
+                f"duration_ms={int(shard_duration * 1000)}"
             )
             return shard_pass1_found, shard_results
 
@@ -1399,6 +1492,20 @@ If found=false, explanation must clearly state: what terms were searched, what (
 
         pass2_recovered = found_count - pass1_found
         extraction_time = time.perf_counter() - t_all_start
+
+        # Pass-level structured metric (wall-clock, budget, shard fan-out).
+        logger.info(
+            "[METRICS][EXTRACT_ALL] "
+            f"project_id={project_id} "
+            f"total_params={len(all_results)} "
+            f"found={found_count} "
+            f"pass1_found={pass1_found} "
+            f"pass2_recovered={pass2_recovered} "
+            f"shards={len(shards)} "
+            f"llm_calls={self._current_budget.calls} "
+            f"budget_aborted={self._current_budget.aborted} "
+            f"duration_ms={int(extraction_time * 1000)}"
+        )
 
         # ── Update extraction run record if present ──
         if hasattr(self, '_current_run_id') and self._current_run_id:
