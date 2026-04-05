@@ -148,3 +148,15 @@ def run_migrations():
             "ALTER TABLE projects ADD COLUMN IF NOT EXISTS "
             "extraction_runs_completed INTEGER DEFAULT 0"
         )
+
+        # ── Persisted coordinator state (alembic 0004) ───────────────────────
+        # Mirrors the alembic migration so environments that don't run
+        # `alembic upgrade head` still get the columns on startup.
+        _run_migration(conn, "projects extracted_doc_ids",
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS "
+            "extracted_doc_ids JSONB DEFAULT '[]'::jsonb"
+        )
+        _run_migration(conn, "projects doc_file_types",
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS "
+            "doc_file_types JSONB DEFAULT '{}'::jsonb"
+        )
