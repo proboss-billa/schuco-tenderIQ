@@ -324,7 +324,9 @@ class DocumentProcessor:
     def _generate_embeddings(self, texts: List[str]) -> List[List[float]]:
         """
         Call the embedding client in batches to avoid hitting API size limits.
-        Uses parallel threads for 3+ batches to speed up large documents.
+        Always parallelizes across batches -- thread-pool overhead (~few ms)
+        is negligible compared to even one network round-trip to the
+        embedding API (~200-800ms per batch).
         """
         EMBED_WORKERS = 5
         t0 = time.perf_counter()
@@ -333,32 +335,26 @@ class DocumentProcessor:
         for start in range(0, len(texts), EMBED_BATCH_SIZE):
             batches.append(texts[start: start + EMBED_BATCH_SIZE])
 
-        if len(batches) <= 2:
-            # Few batches — sequential is fine, avoid thread overhead
-            all_embeddings: List[List[float]] = []
-            for batch_num, batch in enumerate(batches, 1):
-                bt = time.perf_counter()
-                batch_embeddings = self._embed_with_retry(batch)
-                logger.info(
-                    f"[TIMING][EMBED] batch {batch_num} ({len(batch)} texts): "
-                    f"{time.perf_counter() - bt:.2f}s"
-                )
-                all_embeddings.extend(batch_embeddings)
-        else:
-            # Multiple batches — parallelize
-            ordered_results: List[List[List[float]] | None] = [None] * len(batches)
-            with concurrent.futures.ThreadPoolExecutor(max_workers=EMBED_WORKERS) as executor:
-                future_to_idx = {
-                    executor.submit(self._embed_with_retry, batch): i
-                    for i, batch in enumerate(batches)
-                }
-                for future in concurrent.futures.as_completed(future_to_idx):
-                    idx = future_to_idx[future]
-                    ordered_results[idx] = future.result()
+        if not batches:
+            return []
 
-            all_embeddings = []
-            for batch_result in ordered_results:
-                all_embeddings.extend(batch_result)
+        # Parallelize every batch. For single-batch docs this is still a
+        # one-shot call -- the pool just wraps it.
+        ordered_results: List[List[List[float]] | None] = [None] * len(batches)
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(EMBED_WORKERS, len(batches))
+        ) as executor:
+            future_to_idx = {
+                executor.submit(self._embed_with_retry, batch): i
+                for i, batch in enumerate(batches)
+            }
+            for future in concurrent.futures.as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                ordered_results[idx] = future.result()
+
+        all_embeddings: List[List[float]] = []
+        for batch_result in ordered_results:
+            all_embeddings.extend(batch_result)
 
         logger.info(
             f"[TIMING][EMBED] total {len(texts)} texts in "
@@ -449,20 +445,43 @@ class DocumentProcessor:
             })
 
         t_flush = time.perf_counter()
-        # Batch-upsert to Pinecone (max 100 vectors per call) with retry
+        # Batch-upsert to Pinecone (max 100 vectors per call) with retry.
+        # Parallelized: each HTTP upsert is ~500-1500ms and fully independent,
+        # so sending 5 batches sequentially burned 2.5-7.5s per document that
+        # we can reclaim with a small thread pool. Pinecone's free tier
+        # throughput limit is ~100 req/s, well above our 5-way parallelism.
         PINECONE_BATCH = 100
-        for start in range(0, len(pinecone_vectors), PINECONE_BATCH):
-            batch = pinecone_vectors[start: start + PINECONE_BATCH]
+        PINECONE_UPSERT_WORKERS = 5
+
+        batches = [
+            pinecone_vectors[start: start + PINECONE_BATCH]
+            for start in range(0, len(pinecone_vectors), PINECONE_BATCH)
+        ]
+
+        def _upsert_one_batch(batch_idx_and_vectors):
+            batch_idx, batch = batch_idx_and_vectors
             for attempt in range(3):
                 try:
                     self.pinecone.upsert(vectors=batch)
-                    break
+                    return
                 except Exception as e:
                     if attempt == 2:
-                        logger.error(f"[STORE] Pinecone upsert failed after 3 attempts for batch {start}: {e}")
+                        logger.error(
+                            f"[STORE] Pinecone upsert failed after 3 attempts "
+                            f"for batch {batch_idx}: {e}"
+                        )
                         raise
-                    logger.warning(f"[STORE] Pinecone upsert retry {attempt+1}: {e}")
+                    logger.warning(
+                        f"[STORE] Pinecone upsert retry {attempt + 1} "
+                        f"(batch {batch_idx}): {e}"
+                    )
                     time.sleep(2 ** attempt)
+
+        if batches:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(PINECONE_UPSERT_WORKERS, len(batches))
+            ) as executor:
+                list(executor.map(_upsert_one_batch, list(enumerate(batches))))
         t_pine = time.perf_counter()
 
         self.db.commit()
