@@ -13,12 +13,20 @@ scanned specs aren't misinterpreted as drawings and vice versa.
 
 Vision pages are processed in parallel batches for speed (~4x faster than
 sequential processing on a 50-page drawing set).
+
+Performance optimizations:
+  • Text extraction and vision processing run CONCURRENTLY (separate thread)
+  • Adaptive DPI: 150 for large docs (>50 vision pages), 200 for smaller docs
+  • Large batches (20 pages) with 15 concurrent API workers
+  • Progress logging with ETA for vision processing
 """
 from __future__ import annotations
 
 import concurrent.futures
 import logging
 import os
+import threading
+import time
 from typing import List, Dict, Tuple
 
 import fitz  # PyMuPDF
@@ -32,11 +40,15 @@ logger = logging.getLogger(__name__)
 MIN_TEXT_CHARS = 100
 # DPI for rendering image pages — 200 gives clear annotations for dimensions/notes
 RENDER_DPI = 200
+# Reduced DPI for large documents (>50 vision pages) — faster rendering + smaller PNGs
+RENDER_DPI_LARGE = 150
+# Threshold: docs with more vision pages than this use reduced DPI
+LARGE_DOC_VISION_THRESHOLD = 50
 # Max image pages processed via vision per document (cost/time guard)
 MAX_VISION_PAGES = 150
 # Parallel vision processing
-VISION_BATCH_SIZE = 10   # pages rendered at once (memory guard: ~10 PNGs × 3MB = ~30MB)
-VISION_WORKERS = 10      # concurrent Vision API calls within a batch
+VISION_BATCH_SIZE = 20   # pages rendered at once (memory guard: ~20 PNGs × 3MB = ~60MB)
+VISION_WORKERS = 15      # concurrent Vision API calls within a batch
 # Parallel table extraction (pdfplumber is slow per page, ~200-500ms)
 TABLE_WORKERS = 4        # concurrent pdfplumber extract_tables calls
 # Vision model — must be kept in sync with available Gemini models
@@ -175,12 +187,39 @@ class DrawingPDFParser:
                 else:
                     vision_skipped += 1
 
+            # ── Adaptive DPI: reduce for large documents ────────────────────
+            render_dpi = RENDER_DPI
+            if len(vision_page_indices) > LARGE_DOC_VISION_THRESHOLD:
+                render_dpi = RENDER_DPI_LARGE
+                logger.info(
+                    f"[HYBRID_PDF] Large doc ({len(vision_page_indices)} vision pages) "
+                    f"— using reduced DPI {render_dpi} for faster processing"
+                )
+
             logger.info(
                 f"[HYBRID_PDF] Classification: {len(text_page_indices)} text pages, "
-                f"{len(vision_page_indices)} vision pages, {vision_skipped} skipped"
+                f"{len(vision_page_indices)} vision pages, {vision_skipped} skipped "
+                f"(DPI={render_dpi})"
             )
 
+            # ── Launch vision processing in background thread ───────────────
+            # Text pages and vision pages are disjoint sets, so they can be
+            # processed concurrently. Vision is the bottleneck (5-25s per page
+            # via Gemini API), so starting it early saves significant time.
+            vision_results: Dict[int, Tuple[str, str]] = {}  # idx → (page_type, text)
+
+            if vision_page_indices:
+                vision_thread = threading.Thread(
+                    target=self._process_vision_pages,
+                    args=(fitz_doc, vision_page_indices, render_dpi, vision_results),
+                    daemon=True,
+                )
+                vision_thread.start()
+            else:
+                vision_thread = None
+
             # ── Phase 2: Process text pages (spans + parallel tables) ───────
+            # Runs on main thread CONCURRENTLY with vision processing.
             # Text span extraction via fitz is fast (~1ms/page) and must be
             # sequential (tracks current_section/subsection state).
             # Table extraction via pdfplumber is SLOW (~200-500ms/page) and
@@ -219,45 +258,12 @@ class DrawingPDFParser:
                         f"from {len(text_page_indices)} text pages"
                     )
 
-            # ── Phase 3: Process vision pages in parallel batches ────────────
-            vision_results: Dict[int, Tuple[str, str]] = {}  # idx → (page_type, text)
-
-            for batch_start in range(0, len(vision_page_indices), VISION_BATCH_SIZE):
-                batch_indices = vision_page_indices[batch_start:batch_start + VISION_BATCH_SIZE]
-
-                # 3a: Render batch to PNG (main thread, fast ~50ms per page)
-                rendered: Dict[int, bytes] = {}
-                for page_idx in batch_indices:
-                    fitz_page = fitz_doc[page_idx]
-                    mat = fitz.Matrix(RENDER_DPI / 72, RENDER_DPI / 72)
-                    pix = fitz_page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
-                    rendered[page_idx] = pix.tobytes("png")
-                    del pix
-
-                # 3b: Submit Vision API calls in parallel
-                with concurrent.futures.ThreadPoolExecutor(max_workers=VISION_WORKERS) as executor:
-                    future_to_idx = {
-                        executor.submit(
-                            self._call_vision_with_retry, rendered[idx], idx + 1
-                        ): idx
-                        for idx in batch_indices
-                    }
-                    for future in concurrent.futures.as_completed(future_to_idx):
-                        idx = future_to_idx[future]
-                        try:
-                            raw_text = future.result()
-                            page_type, content = _parse_vision_response(raw_text)
-                            vision_results[idx] = (page_type, content)
-                        except Exception as e:
-                            logger.warning(f"[HYBRID_PDF] Vision failed page {idx + 1}: {e}")
-                            vision_results[idx] = ("error", "")
-
-                # 3c: Free rendered PNGs for this batch
-                del rendered
-
-                done_so_far = min(batch_start + VISION_BATCH_SIZE, len(vision_page_indices))
+            # ── Wait for vision thread to complete ──────────────────────────
+            if vision_thread is not None:
+                logger.info("[HYBRID_PDF] Text extraction done — waiting for vision thread...")
+                vision_thread.join()
                 logger.info(
-                    f"[HYBRID_PDF] Vision batch done: {done_so_far}/{len(vision_page_indices)} pages"
+                    f"[HYBRID_PDF] Vision thread complete — {len(vision_results)} pages processed"
                 )
 
             # ── Phase 4: Build blocks from vision results in page order ──────
@@ -324,6 +330,70 @@ class DrawingPDFParser:
             f"tables:{vision_table_count}] skipped:{vision_skipped})"
         )
         return blocks, total_pages, stats
+
+    def _process_vision_pages(
+        self,
+        fitz_doc,
+        vision_page_indices: List[int],
+        render_dpi: int,
+        vision_results: Dict[int, Tuple[str, str]],
+    ):
+        """Process vision pages in parallel batches. Thread-safe — writes to vision_results dict.
+
+        Runs in a background thread while text extraction happens on the main thread.
+        Each batch: render pages to PNG → submit parallel Vision API calls → collect results.
+        Progress is logged with elapsed time and ETA.
+        """
+        start_time = time.time()
+        total_vision = len(vision_page_indices)
+
+        for batch_start in range(0, total_vision, VISION_BATCH_SIZE):
+            batch_indices = vision_page_indices[batch_start:batch_start + VISION_BATCH_SIZE]
+
+            # Render batch to PNG (fast ~50ms per page)
+            rendered: Dict[int, bytes] = {}
+            for page_idx in batch_indices:
+                try:
+                    fitz_page = fitz_doc[page_idx]
+                    mat = fitz.Matrix(render_dpi / 72, render_dpi / 72)
+                    pix = fitz_page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
+                    rendered[page_idx] = pix.tobytes("png")
+                    del pix
+                except Exception as e:
+                    logger.warning(f"[HYBRID_PDF] Render failed page {page_idx + 1}: {e}")
+
+            # Submit Vision API calls in parallel
+            with concurrent.futures.ThreadPoolExecutor(max_workers=VISION_WORKERS) as executor:
+                future_to_idx = {
+                    executor.submit(
+                        self._call_vision_with_retry, rendered[idx], idx + 1
+                    ): idx
+                    for idx in batch_indices
+                    if idx in rendered  # skip pages that failed to render
+                }
+                for future in concurrent.futures.as_completed(future_to_idx):
+                    idx = future_to_idx[future]
+                    try:
+                        raw_text = future.result()
+                        page_type, content = _parse_vision_response(raw_text)
+                        vision_results[idx] = (page_type, content)
+                    except Exception as e:
+                        logger.warning(f"[HYBRID_PDF] Vision failed page {idx + 1}: {e}")
+                        vision_results[idx] = ("error", "")
+
+            # Free rendered PNGs for this batch
+            del rendered
+
+            # Progress logging with ETA
+            elapsed = time.time() - start_time
+            pages_done = min(batch_start + VISION_BATCH_SIZE, total_vision)
+            pages_remaining = total_vision - pages_done
+            rate = elapsed / max(pages_done, 1)
+            eta = rate * pages_remaining
+            logger.info(
+                f"[HYBRID_PDF] Vision: {pages_done}/{total_vision} pages "
+                f"({elapsed:.0f}s elapsed, ~{eta:.0f}s remaining)"
+            )
 
     @retry(
         retry=retry_if_exception_type(Exception),
