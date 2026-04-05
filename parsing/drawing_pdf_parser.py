@@ -5,20 +5,21 @@ Universal hybrid PDF parser for ALL document types.
 
 Auto-detects per page:
   • Text pages (≥100 extractable chars) → PyMuPDF span extraction + pdfplumber tables
-  • Image pages (<100 chars) → Gemini Vision with adaptive prompt (drawings OR scanned text)
+  • Image pages (<100 chars) → Mistral OCR (primary) + Gemini Vision (fallback for drawings)
 
-The adaptive vision prompt first identifies the page type (technical drawing,
-scanned text, table, form, etc.) then extracts content accordingly — so
-scanned specs aren't misinterpreted as drawings and vice versa.
-
-Vision pages are processed in parallel batches for speed (~4x faster than
-sequential processing on a 50-page drawing set).
+Two-tier OCR strategy for image pages:
+  1. Mistral OCR processes ALL image pages in a single API call (fast, ~1-3s/page).
+     Excellent at scanned text, tables, and forms — the majority of tender content.
+  2. Gemini Vision re-processes pages where Mistral returned low-yield results
+     (<200 chars). These are typically technical drawings where Gemini's rich
+     prompt extracts dimensions, callouts, and annotations that pure OCR misses.
 
 Performance optimizations:
-  • Text extraction and vision processing run CONCURRENTLY (separate thread)
+  • Mistral OCR single-call batch processing (replaces per-page Gemini calls)
+  • Text extraction and OCR processing run CONCURRENTLY (separate thread)
   • Adaptive DPI: 150 for large docs (>50 vision pages), 200 for smaller docs
-  • Large batches (20 pages) with 15 concurrent API workers
-  • Progress logging with ETA for vision processing
+  • Gemini fallback runs in parallel batches (20 pages, 15 workers)
+  • Progress logging with ETA
 """
 from __future__ import annotations
 
@@ -33,6 +34,8 @@ import fitz  # PyMuPDF
 from google import genai
 from google.genai import types
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
+
+from parsing.mistral_ocr import MistralOCRClient, LOW_YIELD_THRESHOLD
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +122,21 @@ class DrawingPDFParser:
 
     def __init__(self):
         self.gemini = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+        # Mistral OCR client — lazily initialized (may fail if key missing)
+        self._mistral: MistralOCRClient | None = None
+
+    def _get_mistral(self) -> MistralOCRClient | None:
+        """Return Mistral OCR client, or None if unavailable."""
+        if self._mistral is not None:
+            return self._mistral
+        try:
+            self._mistral = MistralOCRClient()
+            return self._mistral
+        except Exception as e:
+            logger.warning(
+                f"[HYBRID_PDF] Mistral OCR unavailable ({e}) — using Gemini only"
+            )
+            return None
 
     def parse(self, pdf_path: str) -> List[Dict]:
         blocks, _, _ = self.parse_with_page_count(pdf_path)
@@ -211,7 +229,7 @@ class DrawingPDFParser:
             if vision_page_indices:
                 vision_thread = threading.Thread(
                     target=self._process_vision_pages,
-                    args=(fitz_doc, vision_page_indices, render_dpi, vision_results),
+                    args=(pdf_path, fitz_doc, vision_page_indices, render_dpi, vision_results),
                     daemon=True,
                 )
                 vision_thread.start()
@@ -333,24 +351,91 @@ class DrawingPDFParser:
 
     def _process_vision_pages(
         self,
+        pdf_path: str,
         fitz_doc,
         vision_page_indices: List[int],
         render_dpi: int,
         vision_results: Dict[int, Tuple[str, str]],
     ):
-        """Process vision pages in parallel batches. Thread-safe — writes to vision_results dict.
+        """Process vision pages with two-tier OCR: Mistral first, Gemini fallback.
 
-        Runs in a background thread while text extraction happens on the main thread.
-        Each batch: render pages to PNG → submit parallel Vision API calls → collect results.
-        Progress is logged with elapsed time and ETA.
+        Tier 1 — Mistral OCR (primary, fast):
+          Single API call processing all requested pages. Returns markdown per page.
+          Handles scanned text, tables, forms, and simple drawings well.
+
+        Tier 2 — Gemini Vision (fallback, thorough):
+          Re-processes pages where Mistral returned <LOW_YIELD_THRESHOLD chars.
+          These are typically technical drawings where Gemini's detailed prompt
+          extracts dimensions, callouts, and annotations that pure OCR misses.
+
+        Writes to vision_results dict: {page_idx → (page_type, text)}.
+        Thread-safe — runs in a background thread.
         """
         start_time = time.time()
         total_vision = len(vision_page_indices)
+        mistral_pages: Dict[int, str] = {}
+        fallback_indices: List[int] = []
 
-        for batch_start in range(0, total_vision, VISION_BATCH_SIZE):
-            batch_indices = vision_page_indices[batch_start:batch_start + VISION_BATCH_SIZE]
+        # ── Tier 1: Mistral OCR (single batch call) ──────────────────────
+        mistral = self._get_mistral()
+        if mistral is not None:
+            try:
+                logger.info(
+                    f"[HYBRID_PDF] Mistral OCR: processing {total_vision} pages in single call"
+                )
+                mistral_pages = mistral.extract_pages(pdf_path, vision_page_indices)
+                mistral_elapsed = time.time() - start_time
+                logger.info(
+                    f"[HYBRID_PDF] Mistral OCR done in {mistral_elapsed:.0f}s "
+                    f"({len(mistral_pages)} pages returned)"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[HYBRID_PDF] Mistral OCR failed ({e}) — falling back to Gemini for all pages"
+                )
+                mistral_pages = {}
 
-            # Render batch to PNG (fast ~50ms per page)
+        # ── Classify Mistral results: keep high-yield, queue low-yield ───
+        for page_idx in vision_page_indices:
+            markdown = mistral_pages.get(page_idx, "")
+            if len(markdown.strip()) >= LOW_YIELD_THRESHOLD:
+                # Mistral got good content — classify as spec/table based on markdown structure
+                page_type = _classify_mistral_markdown(markdown)
+                vision_results[page_idx] = (page_type, markdown)
+            else:
+                # Low yield — likely a drawing. Queue for Gemini fallback.
+                fallback_indices.append(page_idx)
+
+        if mistral_pages:
+            logger.info(
+                f"[HYBRID_PDF] Mistral high-yield: {len(vision_results)} pages, "
+                f"fallback to Gemini: {len(fallback_indices)} pages"
+            )
+
+        # ── Tier 2: Gemini Vision fallback for low-yield pages ───────────
+        if fallback_indices:
+            self._process_with_gemini(
+                fitz_doc, fallback_indices, render_dpi, vision_results, start_time
+            )
+
+        elapsed = time.time() - start_time
+        logger.info(f"[HYBRID_PDF] Vision processing complete in {elapsed:.0f}s")
+
+    def _process_with_gemini(
+        self,
+        fitz_doc,
+        page_indices: List[int],
+        render_dpi: int,
+        vision_results: Dict[int, Tuple[str, str]],
+        start_time: float,
+    ):
+        """Process pages with Gemini Vision in parallel batches (fallback path)."""
+        total = len(page_indices)
+
+        for batch_start in range(0, total, VISION_BATCH_SIZE):
+            batch_indices = page_indices[batch_start:batch_start + VISION_BATCH_SIZE]
+
+            # Render batch to PNG
             rendered: Dict[int, bytes] = {}
             for page_idx in batch_indices:
                 try:
@@ -369,7 +454,7 @@ class DrawingPDFParser:
                         self._call_vision_with_retry, rendered[idx], idx + 1
                     ): idx
                     for idx in batch_indices
-                    if idx in rendered  # skip pages that failed to render
+                    if idx in rendered
                 }
                 for future in concurrent.futures.as_completed(future_to_idx):
                     idx = future_to_idx[future]
@@ -378,21 +463,20 @@ class DrawingPDFParser:
                         page_type, content = _parse_vision_response(raw_text)
                         vision_results[idx] = (page_type, content)
                     except Exception as e:
-                        logger.warning(f"[HYBRID_PDF] Vision failed page {idx + 1}: {e}")
+                        logger.warning(f"[HYBRID_PDF] Gemini failed page {idx + 1}: {e}")
                         vision_results[idx] = ("error", "")
 
-            # Free rendered PNGs for this batch
             del rendered
 
-            # Progress logging with ETA
+            # Progress with ETA
             elapsed = time.time() - start_time
-            pages_done = min(batch_start + VISION_BATCH_SIZE, total_vision)
-            pages_remaining = total_vision - pages_done
-            rate = elapsed / max(pages_done, 1)
+            pages_done = min(batch_start + VISION_BATCH_SIZE, total)
+            pages_remaining = total - pages_done
+            rate = (elapsed / max(pages_done, 1)) if pages_done else 0
             eta = rate * pages_remaining
             logger.info(
-                f"[HYBRID_PDF] Vision: {pages_done}/{total_vision} pages "
-                f"({elapsed:.0f}s elapsed, ~{eta:.0f}s remaining)"
+                f"[HYBRID_PDF] Gemini fallback: {pages_done}/{total} pages "
+                f"({elapsed:.0f}s total elapsed, ~{eta:.0f}s remaining)"
             )
 
     @retry(
@@ -493,6 +577,21 @@ def _extract_tables_parallel(
     # Sort by page number for consistent ordering
     all_table_blocks.sort(key=lambda b: (b["page"], b.get("table_index", 0)))
     return all_table_blocks
+
+
+def _classify_mistral_markdown(markdown: str) -> str:
+    """Classify Mistral OCR output into our page-type taxonomy.
+
+    Mistral returns plain markdown — no type hint. We infer type from structure:
+      • Has markdown tables (| col | col |) → 'C' (table/schedule)
+      • Otherwise → 'B' (scanned text) since Mistral OCR got meaningful content.
+    Drawings would have returned low-yield and been routed to Gemini fallback.
+    """
+    # Heuristic: if >2 lines contain pipe-delimited content, treat as table
+    pipe_lines = sum(1 for line in markdown.split("\n") if line.count("|") >= 2)
+    if pipe_lines >= 3:
+        return "C"
+    return "B"
 
 
 def _parse_vision_response(raw_text: str) -> Tuple[str, str]:
