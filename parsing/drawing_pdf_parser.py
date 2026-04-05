@@ -55,7 +55,7 @@ MAX_VISION_PAGES = 150
 VISION_BATCH_SIZE = 20   # pages rendered at once (memory guard: ~20 PNGs × 3MB = ~60MB)
 VISION_WORKERS = 15      # concurrent Vision API calls within a batch
 # Parallel table extraction (pdfplumber is slow per page, ~200-500ms)
-TABLE_WORKERS = 4        # concurrent pdfplumber extract_tables calls
+TABLE_WORKERS = 8        # concurrent pdfplumber extract_tables calls
 # Vision model — must be kept in sync with available Gemini models
 VISION_MODEL = "gemini-2.5-flash"
 # Skip pdfplumber table extraction on very large PDFs (too slow)
@@ -168,7 +168,9 @@ class DrawingPDFParser:
         blocks, _, _ = self.parse_with_page_count(pdf_path)
         return blocks
 
-    def parse_with_page_count(self, pdf_path: str) -> Tuple[List[Dict], int, Dict]:
+    def parse_with_page_count(
+        self, pdf_path: str, file_type: str | None = None
+    ) -> Tuple[List[Dict], int, Dict]:
         blocks: List[Dict] = []
         current_section: str | None = None
         current_subsection: str | None = None
@@ -204,10 +206,18 @@ class DrawingPDFParser:
             logger.info(f"[HYBRID_PDF] '{pdf_path}': encrypted but no user password — opened OK")
 
         total_pages = len(fitz_doc)
-        skip_tables = total_pages > SKIP_TABLES_ABOVE_PAGES
+        # Skip pdfplumber tables when:
+        #   (a) doc is huge (>SKIP_TABLES_ABOVE_PAGES pages) -- too slow, or
+        #   (b) file is a drawing -- pdfplumber's find_tables() burns
+        #       30-120s on vector CAD pages trying to detect tables from
+        #       line segments that aren't tables. Real drawings almost
+        #       never have structured tables anyway; title blocks and
+        #       schedules are captured by span extraction.
+        is_drawing = (file_type or "").endswith("drawing")
+        skip_tables = total_pages > SKIP_TABLES_ABOVE_PAGES or is_drawing
         logger.info(
             f"[HYBRID_PDF] {pdf_path}: {total_pages} pages "
-            f"(tables={'skip' if skip_tables else 'extract'})"
+            f"(file_type={file_type}, tables={'skip' if skip_tables else 'extract'})"
         )
 
         # Track vision page types for stats
