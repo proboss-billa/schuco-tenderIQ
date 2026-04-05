@@ -227,10 +227,26 @@ class DrawingPDFParser:
 
         try:
             # ── Phase 1: Classify pages into text vs vision ──────────────────
+            # For drawings, force every page through vision regardless of
+            # char count. CAD pages often have 500-3000 chars of dimension
+            # callouts / profile labels, which would otherwise pass the
+            # MIN_TEXT_CHARS threshold and route to span extraction -- which
+            # strips away all spatial context (dimensions, geometry,
+            # callout-to-element relationships). The whole point of a
+            # drawing is its layout, not its text strings.
             text_page_indices = []
             vision_page_indices = []
+            force_vision = is_drawing
 
             for page_idx in range(total_pages):
+                if force_vision:
+                    if vision_count < MAX_VISION_PAGES:
+                        vision_page_indices.append(page_idx)
+                        vision_count += 1
+                    else:
+                        vision_skipped += 1
+                    continue
+
                 fitz_page = fitz_doc[page_idx]
                 page_text = fitz_page.get_text("text").strip()
                 if len(page_text) >= MIN_TEXT_CHARS:
