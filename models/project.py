@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, Integer, String, Text, TIMESTAMP, func
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy import String, Text, TIMESTAMP, func
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 import uuid
 
@@ -70,44 +70,4 @@ class Project(Base):
     pipeline_step: Mapped[str | None] = mapped_column(
         Text,
         nullable=True
-    )
-
-    # --- Streaming extraction flag (see alembic 0003) ---
-    # When True, parameter extraction runs incrementally as documents finish
-    # indexing instead of waiting for the entire corpus. New projects default
-    # to True; legacy projects default to True at the DB level too, but the
-    # coordinator still respects the flag for easy rollback.
-    streaming_extraction: Mapped[bool] = mapped_column(
-        Boolean,
-        default=True,
-        nullable=True,
-    )
-
-    # Number of incremental extraction passes completed for this project.
-    # Used by the coordinator as a cost guard (hard cap).
-    extraction_runs_completed: Mapped[int] = mapped_column(
-        Integer,
-        default=0,
-        nullable=True,
-    )
-
-    # --- Persisted coordinator state (alembic 0004) ---
-    # Both columns are `deferred=True` so the default `SELECT *` does NOT
-    # include them. This keeps Project queries working on databases where
-    # alembic 0004 hasn't been applied yet — the columns are only loaded
-    # when explicitly accessed, and the coordinator wraps those reads in
-    # try/except so a missing column degrades gracefully instead of
-    # breaking every Project-touching endpoint.
-    extracted_doc_ids: Mapped[list] = mapped_column(
-        JSONB,
-        default=list,
-        nullable=True,
-        deferred=True,
-    )
-
-    doc_file_types: Mapped[dict] = mapped_column(
-        JSONB,
-        default=dict,
-        nullable=True,
-        deferred=True,
     )

@@ -1,4 +1,8 @@
-"""Integration tests for ExtractionCoordinator state machine.
+"""⚠️  PARKED EXPERIMENT — tests target the parked ExtractionCoordinator.
+    Skipped by default when run from the active pipeline. Kept in-tree
+    for later resumption of the streaming-extraction work.  ⚠️
+
+Integration tests for ExtractionCoordinator state machine.
 
 Covers the streaming-extraction scheduler without hitting a real database,
 Pinecone, or LLM. Stubs the DB-touching helpers and `_invoke_extraction`

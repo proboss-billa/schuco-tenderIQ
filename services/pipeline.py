@@ -13,7 +13,6 @@ from extraction.parameter_extractor import ParameterExtractor
 from models.document import Document
 from models.project import Project
 from processing.document_processor import DocumentProcessor
-from services.extraction_coordinator import ExtractionCoordinator
 
 # ── Global pipeline concurrency cap ──────────────────────────────────────────
 # Limits simultaneous _run_pipeline executions to prevent DB pool exhaustion
@@ -102,19 +101,6 @@ async def _run_pipeline_inner(project_id: uuid.UUID, model_key: str = None, ocr_
             f"[PIPELINE] {len(spec_docs)} spec docs, {len(boq_docs)} BOQ docs"
         )
 
-        # ── Streaming extraction coordinator (runs extraction incrementally
-        # as documents finish indexing, instead of waiting for the whole corpus).
-        # Controlled per-project; legacy synchronous path runs if disabled.
-        streaming_enabled = bool(getattr(project, "streaming_extraction", True))
-        coordinator: ExtractionCoordinator | None = None
-        coordinator_task: asyncio.Task | None = None
-        if streaming_enabled:
-            coordinator = ExtractionCoordinator(project_id, model_key=model_key)
-            coordinator_task = asyncio.create_task(coordinator.run_loop())
-            _pipeline_log.info(
-                f"[PIPELINE] Streaming extraction coordinator started for {project_id}"
-            )
-
         processor = DocumentProcessor(
             project_id=project_id,
             db_session=db,
@@ -123,105 +109,41 @@ async def _run_pipeline_inner(project_id: uuid.UUID, model_key: str = None, ocr_
             ocr_engine=ocr_engine,
         )
 
-        # ── Phase 1: Parse all BOQ + spec docs in PARALLEL ───────────────────
-        # BOQs used to run sequentially in a blocking pre-phase. That burned
-        # 30-60s per BOQ file before any spec doc started parsing. Now BOQ
-        # and spec docs share the same asyncio.Semaphore and run fully
-        # concurrent. BoQs are still high-priority for the extraction
-        # coordinator (priority 100 vs 80/60), so they still dominate the
-        # first extraction pass -- just without blocking parse-time.
+        # ── Process BOQ documents (no LLM extraction needed) ─────────────────
+        boq_pinecone_tasks = []
+        for doc in boq_docs:
+            project.pipeline_step = f"Processing BOQ: {doc.original_filename}"
+            doc.processing_status = "processing"
+            db.commit()
+            t_boq = _time.perf_counter()
+            try:
+                processor._process_boq_document(doc)
+                doc.processing_status = "completed"
+                _pipeline_log.info(
+                    f"[TIMING][PIPELINE] BOQ {doc.original_filename}: "
+                    f"{_time.perf_counter() - t_boq:.2f}s"
+                )
+                # Fire Pinecone wait so BOQ vectors are ready for extraction
+                boq_pinecone_tasks.append(
+                    asyncio.create_task(
+                        _wait_for_pinecone_doc(str(project_id), str(doc.document_id), timeout=120)
+                    )
+                )
+            except Exception as e:
+                _pipeline_log.error(f"[PIPELINE] BOQ failed {doc.original_filename}: {e}")
+                doc.processing_status = "failed"
+                doc.processing_error = str(e)[:4000]
+            db.commit()
+
+        # ── Phase 1: Parse all spec docs in PARALLEL ─────────────────────────
         DOC_CONCURRENCY = 6
         _doc_semaphore = asyncio.Semaphore(DOC_CONCURRENCY)
         _progress_lock = asyncio.Lock()
         _completed_count = [0]
-        total_all = total_spec + len(boq_docs)
 
-        boq_pinecone_tasks = []
         indexed_spec_count = 0
         indexed_docs    = []
         pinecone_wait_tasks = []
-
-        async def _boq_notify_when_ready(doc_id: str, doc_name: str, file_type: str = "excel_boq"):
-            """Background task: await Pinecone sync, then notify coordinator."""
-            ready = await _wait_for_pinecone_doc(
-                str(project_id), doc_id, timeout=120
-            )
-            if ready and coordinator is not None:
-                await coordinator.notify_doc_indexed(
-                    doc_id, filename=doc_name, file_type=file_type
-                )
-            return ready
-
-        async def _process_one_boq(doc, idx):
-            """Process a single BOQ doc on its own session so it can run
-            concurrently with spec docs. Mirrors _process_one_spec shape."""
-            async with _doc_semaphore:
-                doc_id = doc.document_id
-                doc_name = doc.original_filename
-
-                async with _progress_lock:
-                    project.pipeline_step = (
-                        f"Processing documents ({idx}/{total_all})..."
-                    )
-                    db.commit()
-
-                t_boq = _time.perf_counter()
-                doc_session = SessionLocal()
-                try:
-                    doc_local = doc_session.query(Document).filter(
-                        Document.document_id == doc_id
-                    ).first()
-                    doc_local.processing_status = "processing"
-                    doc_session.commit()
-
-                    boq_processor = DocumentProcessor(
-                        project_id=project_id,
-                        db_session=doc_session,
-                        pinecone_index=pinecone_index,
-                        embedding_client=embedding_client,
-                        ocr_engine=ocr_engine,
-                    )
-
-                    loop = asyncio.get_event_loop()
-                    await loop.run_in_executor(
-                        None, boq_processor._process_boq_document, doc_local
-                    )
-
-                    doc_local.processing_status = "completed"
-                    doc_session.commit()
-
-                    _completed_count[0] += 1
-                    _pipeline_log.info(
-                        f"[TIMING][PIPELINE] BOQ {doc_name} "
-                        f"({_completed_count[0]}/{total_all}): "
-                        f"{_time.perf_counter() - t_boq:.2f}s"
-                    )
-
-                    wait_task = asyncio.create_task(
-                        _boq_notify_when_ready(
-                            str(doc_id),
-                            doc_name,
-                            file_type=doc_local.file_type or "excel_boq",
-                        )
-                    )
-                    return (doc, True, wait_task)
-
-                except Exception as e:
-                    _pipeline_log.error(f"[PIPELINE] BOQ failed {doc_name}: {e}")
-                    try:
-                        doc_session.rollback()
-                        doc_local = doc_session.query(Document).filter(
-                            Document.document_id == doc_id
-                        ).first()
-                        if doc_local:
-                            doc_local.processing_status = "failed"
-                            doc_local.processing_error = str(e)[:4000]
-                            doc_session.commit()
-                    except Exception:
-                        pass
-                    return (doc, False, None)
-                finally:
-                    doc_session.close()
 
         async def _process_one_spec(doc, idx):
             """Process a single spec document, return (doc, success, wait_task|None)."""
@@ -231,7 +153,7 @@ async def _run_pipeline_inner(project_id: uuid.UUID, model_key: str = None, ocr_
 
                 async with _progress_lock:
                     project.pipeline_step = (
-                        f"Processing documents ({idx}/{total_all})..."
+                        f"Processing documents ({idx}/{total_spec})..."
                     )
                     db.commit()
 
@@ -263,30 +185,13 @@ async def _run_pipeline_inner(project_id: uuid.UUID, model_key: str = None, ocr_
                     _completed_count[0] += 1
                     _pipeline_log.info(
                         f"[TIMING][PIPELINE] Parse+embed {doc_name} "
-                        f"({_completed_count[0]}/{total_all}): "
+                        f"({_completed_count[0]}/{total_spec}): "
                         f"{_time.perf_counter() - t_doc:.2f}s"
                     )
 
-                    # Fire Pinecone wait + coordinator notify in a single task
-                    # so streaming extraction can start on this doc immediately,
-                    # without blocking other docs still parsing.
-                    _doc_file_type = doc_local.file_type or "other"
-
-                    async def _wait_and_notify(
-                        _doc_id=str(doc_id),
-                        _doc_name=doc_name,
-                        _file_type=_doc_file_type,
-                    ):
-                        ready = await _wait_for_pinecone_doc(
-                            str(project_id), _doc_id, timeout=180
-                        )
-                        if ready and coordinator is not None:
-                            await coordinator.notify_doc_indexed(
-                                _doc_id, filename=_doc_name, file_type=_file_type
-                            )
-                        return ready
-
-                    wait_task = asyncio.create_task(_wait_and_notify())
+                    wait_task = asyncio.create_task(
+                        _wait_for_pinecone_doc(str(project_id), str(doc_id), timeout=180)
+                    )
                     return (doc, True, wait_task)
 
                 except Exception as e:
@@ -306,17 +211,12 @@ async def _run_pipeline_inner(project_id: uuid.UUID, model_key: str = None, ocr_
                 finally:
                     doc_session.close()
 
-        # Launch BOQ + spec docs together -- semaphore limits to DOC_CONCURRENCY.
-        # BOQs processed first in the task list so they start first when
-        # slots are contended (they're the highest-priority docs for
-        # extraction kick-off anyway).
-        all_tasks = []
-        for i, doc in enumerate(boq_docs, 1):
-            all_tasks.append(_process_one_boq(doc, i))
-        for i, doc in enumerate(spec_docs, len(boq_docs) + 1):
-            all_tasks.append(_process_one_spec(doc, i))
-
-        spec_results = await asyncio.gather(*all_tasks, return_exceptions=True)
+        # Launch all spec docs concurrently (semaphore limits to DOC_CONCURRENCY)
+        spec_tasks = [
+            _process_one_spec(doc, i)
+            for i, doc in enumerate(spec_docs, 1)
+        ]
+        spec_results = await asyncio.gather(*spec_tasks, return_exceptions=True)
 
         for result in spec_results:
             if isinstance(result, Exception):
@@ -324,14 +224,10 @@ async def _run_pipeline_inner(project_id: uuid.UUID, model_key: str = None, ocr_
                 continue
             doc, success, wait_task = result
             if success:
-                if doc.file_type == "excel_boq":
-                    if wait_task:
-                        boq_pinecone_tasks.append(wait_task)
-                else:
-                    indexed_spec_count += 1
-                    indexed_docs.append(doc)
-                    if wait_task:
-                        pinecone_wait_tasks.append(wait_task)
+                indexed_spec_count += 1
+                indexed_docs.append(doc)
+                if wait_task:
+                    pinecone_wait_tasks.append(wait_task)
 
         # ── Retry failed spec documents once ──────────────────────────────────
         failed_docs = []
@@ -339,7 +235,7 @@ async def _run_pipeline_inner(project_id: uuid.UUID, model_key: str = None, ocr_
             if isinstance(result, Exception):
                 continue
             doc, success, wait_task = result
-            if not success and doc.file_type != "excel_boq":
+            if not success:
                 failed_docs.append(doc)
 
         if failed_docs:
@@ -350,7 +246,7 @@ async def _run_pipeline_inner(project_id: uuid.UUID, model_key: str = None, ocr_
 
             retry_tasks = [
                 _process_one_spec(doc, idx)
-                for idx, doc in enumerate(failed_docs, total_all + 1)
+                for idx, doc in enumerate(failed_docs, total_spec + 1)
             ]
             retry_results = await asyncio.gather(*retry_tasks, return_exceptions=True)
 
@@ -398,71 +294,43 @@ async def _run_pipeline_inner(project_id: uuid.UUID, model_key: str = None, ocr_
                 )
                 db.commit()
 
-        # ── Phase 2: Extract parameters ──────────────────────────────────────
+        # ── Phase 2: Extract ALL parameters ONCE after all docs are indexed ───
         total_indexed = indexed_spec_count + len(boq_docs)
         if total_indexed > 0:
-            if streaming_enabled and coordinator is not None:
-                # Streaming path: coordinator has been firing incremental passes
-                # as each document indexed. Now signal that no more docs will
-                # arrive so it can run the final pass, then wait for it.
-                project.pipeline_step = (
-                    f"Finalizing parameters across {total_indexed} document(s)..."
-                )
-                db.commit()
-                t_extract = _time.perf_counter()
-                await coordinator.notify_indexing_complete()
-                try:
-                    await coordinator_task
-                except Exception as e:
-                    _pipeline_log.error(
-                        f"[PIPELINE] Streaming extraction coordinator failed: {e}"
-                    )
-                _pipeline_log.info(
-                    f"[TIMING][PIPELINE] Streaming extraction total: "
-                    f"{_time.perf_counter() - t_extract:.2f}s"
-                )
-            else:
-                # Legacy path: one big extraction pass after all docs indexed.
-                p_type = project.project_type or "commercial"
-                filtered_params = [
-                    p for p in FACADE_PARAMETERS
-                    if p.get("project_type", "both") in ("both", p_type)
-                ]
-                project.pipeline_step = (
-                    f"Extracting {len(filtered_params)} parameters (full-context + vector search)..."
-                )
-                db.commit()
-                db.expire_all()
+            # Filter parameters by project type (commercial/residential)
+            p_type = project.project_type or "commercial"
+            filtered_params = [
+                p for p in FACADE_PARAMETERS
+                if p.get("project_type", "both") in ("both", p_type)
+            ]
+            project.pipeline_step = (
+                f"Extracting {len(filtered_params)} parameters (full-context + vector search)..."
+            )
+            db.commit()
+            db.expire_all()
 
-                extractor = ParameterExtractor(
-                    pinecone_index=pinecone_index,
-                    embedding_client=embedding_client,
-                    db_session=db,
-                    session_factory=SessionLocal,
-                    model_key=model_key,
-                )
-                t_extract = _time.perf_counter()
-                extractions = await extractor.extract_all_parameters_async(
-                    str(project_id),
-                    facade_parameters=filtered_params,
-                    max_concurrent=10,
-                    num_docs=total_indexed,
-                )
-                found_count = len([e for e in extractions if e.get("found")])
-                _pipeline_log.info(
-                    f"[TIMING][PIPELINE] Extraction (single pass, {total_indexed} docs): "
-                    f"{_time.perf_counter() - t_extract:.2f}s -- "
-                    f"{found_count}/{len(extractions)} params found"
-                )
+            extractor = ParameterExtractor(
+                pinecone_index=pinecone_index,
+                embedding_client=embedding_client,
+                db_session=db,
+                session_factory=SessionLocal,
+                model_key=model_key,
+            )
+            t_extract = _time.perf_counter()
+            extractions = await extractor.extract_all_parameters_async(
+                str(project_id),
+                facade_parameters=filtered_params,
+                max_concurrent=10,
+                num_docs=total_indexed,
+            )
+            found_count = len([e for e in extractions if e.get("found")])
+            _pipeline_log.info(
+                f"[TIMING][PIPELINE] Extraction (single pass, {total_indexed} docs): "
+                f"{_time.perf_counter() - t_extract:.2f}s -- "
+                f"{found_count}/{len(extractions)} params found"
+            )
         else:
             _pipeline_log.warning("[PIPELINE] No documents processed -- skipping extraction")
-            # Cancel the coordinator if it's still running with nothing to do
-            if coordinator is not None and coordinator_task is not None:
-                await coordinator.notify_indexing_complete()
-                try:
-                    await coordinator_task
-                except Exception:
-                    pass
 
         # Mark all successfully indexed docs as completed
         for doc in indexed_docs:
@@ -483,16 +351,6 @@ async def _run_pipeline_inner(project_id: uuid.UUID, model_key: str = None, ocr_
     except Exception as e:
         traceback.print_exc()
         _pipeline_log.error(f"[PIPELINE] FAILED for project {project_id}: {e}")
-        # Cancel any running coordinator so it doesn't outlive the pipeline.
-        try:
-            if 'coordinator_task' in locals() and coordinator_task and not coordinator_task.done():
-                coordinator_task.cancel()
-                try:
-                    await coordinator_task
-                except (asyncio.CancelledError, Exception):
-                    pass
-        except Exception:
-            pass
         try:
             project = db.query(Project).filter(Project.project_id == project_id).first()
             if project:

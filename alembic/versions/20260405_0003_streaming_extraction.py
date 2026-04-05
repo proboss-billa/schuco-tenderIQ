@@ -1,4 +1,8 @@
-"""Add lifecycle state columns for streaming parameter extraction.
+"""⚠️  PARKED EXPERIMENT — migration for the parked streaming-extraction
+    work. Safe to leave: alembic won't auto-run unless explicitly invoked
+    via `alembic upgrade head`. Do not delete.  ⚠️
+
+Add lifecycle state columns for streaming parameter extraction.
 
 Adds per-parameter lifecycle tracking so incremental extraction passes can
 decide when to re-extract, when to promote a value to stable/final, and

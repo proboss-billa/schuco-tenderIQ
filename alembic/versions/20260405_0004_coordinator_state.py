@@ -1,4 +1,8 @@
-"""Persist streaming-extraction coordinator state across worker restarts.
+"""⚠️  PARKED EXPERIMENT — migration for the parked ExtractionCoordinator
+    work. Safe to leave: alembic won't auto-run unless explicitly invoked
+    via `alembic upgrade head`. Do not delete.  ⚠️
+
+Persist streaming-extraction coordinator state across worker restarts.
 
 Adds two JSONB columns on `projects` so a worker restart in the middle of
 an extraction pipeline doesn't lose track of which docs have already been

@@ -36,12 +36,17 @@ logger = logging.getLogger("tenderiq.main")
 
 app = FastAPI(title="Tender Analysis POC API", debug=True)
 
-# Default dev origins: CRA (3000), Vite (5173), Vite preview (4173). Override
-# via ALLOWED_ORIGINS env var for staging/prod.
-ALLOWED_ORIGINS = os.getenv(
-    "ALLOWED_ORIGINS",
-    "http://localhost:3000,http://localhost:5173,http://localhost:4173,http://127.0.0.1:5173",
-).split(",")
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+app.add_middleware(RequestIDMiddleware)
+
 
 # ── Timeout middleware ───────────────────────────────────────────────────────
 # Prevents any request from hanging indefinitely (e.g., slow external API).
@@ -55,23 +60,7 @@ class TimeoutMiddleware(BaseHTTPMiddleware):
                 content={"detail": "Request timed out after 120 seconds"},
             )
 
-
 app.add_middleware(TimeoutMiddleware)
-app.add_middleware(RequestIDMiddleware)
-
-# CORSMiddleware MUST be added last so it ends up outermost in the stack.
-# Starlette's add_middleware prepends, and the stack wraps inside-out, so the
-# last-added is the first to see the response on the way out. Without this,
-# 5xx responses from inner middleware (timeouts, exceptions) escape without
-# CORS headers, and the browser reports a confusing CORS error instead of
-# the real 500.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 # ── Health check with real dependency checks ─────────────────────────────────

@@ -35,9 +35,7 @@ from google import genai
 from google.genai import types
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 
-# Mistral OCR is imported lazily inside _get_mistral() so the parser still
-# loads in environments where the `mistralai` package isn't installed.
-LOW_YIELD_THRESHOLD = 200
+from parsing.mistral_ocr import MistralOCRClient, LOW_YIELD_THRESHOLD
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +53,7 @@ MAX_VISION_PAGES = 150
 VISION_BATCH_SIZE = 20   # pages rendered at once (memory guard: ~20 PNGs × 3MB = ~60MB)
 VISION_WORKERS = 15      # concurrent Vision API calls within a batch
 # Parallel table extraction (pdfplumber is slow per page, ~200-500ms)
-TABLE_WORKERS = 8        # concurrent pdfplumber extract_tables calls
+TABLE_WORKERS = 4        # concurrent pdfplumber extract_tables calls
 # Vision model — must be kept in sync with available Gemini models
 VISION_MODEL = "gemini-2.5-flash"
 # Skip pdfplumber table extraction on very large PDFs (too slow)
@@ -134,30 +132,16 @@ class DrawingPDFParser:
             ocr_engine = "auto"
         self.ocr_engine = ocr_engine
         self.gemini = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-        # Mistral OCR client — lazily initialized (may fail if key/package missing)
-        self._mistral = None
-        self._mistral_tried = False
+        # Mistral OCR client — lazily initialized (may fail if key missing)
+        self._mistral: MistralOCRClient | None = None
 
-    def _get_mistral(self):
-        """Return Mistral OCR client, or None if unavailable.
-
-        Import is deferred so a missing `mistralai` package or missing API key
-        only disables Mistral — it does not break the whole parser.
-        """
+    def _get_mistral(self) -> MistralOCRClient | None:
+        """Return Mistral OCR client, or None if unavailable."""
         if self._mistral is not None:
             return self._mistral
-        if self._mistral_tried:
-            return None
-        self._mistral_tried = True
         try:
-            from parsing.mistral_ocr import MistralOCRClient
             self._mistral = MistralOCRClient()
             return self._mistral
-        except ImportError as e:
-            logger.warning(
-                f"[HYBRID_PDF] Mistral OCR package not installed ({e}) — using Gemini only"
-            )
-            return None
         except Exception as e:
             logger.warning(
                 f"[HYBRID_PDF] Mistral OCR unavailable ({e}) — using Gemini only"
@@ -168,9 +152,7 @@ class DrawingPDFParser:
         blocks, _, _ = self.parse_with_page_count(pdf_path)
         return blocks
 
-    def parse_with_page_count(
-        self, pdf_path: str, file_type: str | None = None
-    ) -> Tuple[List[Dict], int, Dict]:
+    def parse_with_page_count(self, pdf_path: str) -> Tuple[List[Dict], int, Dict]:
         blocks: List[Dict] = []
         current_section: str | None = None
         current_subsection: str | None = None
@@ -206,18 +188,10 @@ class DrawingPDFParser:
             logger.info(f"[HYBRID_PDF] '{pdf_path}': encrypted but no user password — opened OK")
 
         total_pages = len(fitz_doc)
-        # Skip pdfplumber tables when:
-        #   (a) doc is huge (>SKIP_TABLES_ABOVE_PAGES pages) -- too slow, or
-        #   (b) file is a drawing -- pdfplumber's find_tables() burns
-        #       30-120s on vector CAD pages trying to detect tables from
-        #       line segments that aren't tables. Real drawings almost
-        #       never have structured tables anyway; title blocks and
-        #       schedules are captured by span extraction.
-        is_drawing = (file_type or "").endswith("drawing")
-        skip_tables = total_pages > SKIP_TABLES_ABOVE_PAGES or is_drawing
+        skip_tables = total_pages > SKIP_TABLES_ABOVE_PAGES
         logger.info(
             f"[HYBRID_PDF] {pdf_path}: {total_pages} pages "
-            f"(file_type={file_type}, tables={'skip' if skip_tables else 'extract'})"
+            f"(tables={'skip' if skip_tables else 'extract'})"
         )
 
         # Track vision page types for stats
@@ -227,26 +201,10 @@ class DrawingPDFParser:
 
         try:
             # ── Phase 1: Classify pages into text vs vision ──────────────────
-            # For drawings, force every page through vision regardless of
-            # char count. CAD pages often have 500-3000 chars of dimension
-            # callouts / profile labels, which would otherwise pass the
-            # MIN_TEXT_CHARS threshold and route to span extraction -- which
-            # strips away all spatial context (dimensions, geometry,
-            # callout-to-element relationships). The whole point of a
-            # drawing is its layout, not its text strings.
             text_page_indices = []
             vision_page_indices = []
-            force_vision = is_drawing
 
             for page_idx in range(total_pages):
-                if force_vision:
-                    if vision_count < MAX_VISION_PAGES:
-                        vision_page_indices.append(page_idx)
-                        vision_count += 1
-                    else:
-                        vision_skipped += 1
-                    continue
-
                 fitz_page = fitz_doc[page_idx]
                 page_text = fitz_page.get_text("text").strip()
                 if len(page_text) >= MIN_TEXT_CHARS:

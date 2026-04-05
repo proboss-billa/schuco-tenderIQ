@@ -1,4 +1,15 @@
 """
+⚠️  PARKED EXPERIMENT — NOT ACTIVE ON `specs` BRANCH AS OF 2026-04-05  ⚠️
+────────────────────────────────────────────────────────────────────────
+This file is kept in the tree but is no longer imported by the active
+pipeline (services/pipeline.py was reverted to main). Left in place so
+the streaming-extraction work can be resumed later without re-writing
+it from scratch. Do not delete.
+
+To re-activate: restore the streaming hooks in services/pipeline.py
+and main.py from git history (branch `specs`, commits before f732e99).
+────────────────────────────────────────────────────────────────────────
+
 extraction_coordinator.py
 ─────────────────────────
 Per-project coordinator that runs parameter extraction *incrementally* as

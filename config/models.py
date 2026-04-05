@@ -66,7 +66,7 @@ AVAILABLE_MODELS = {
     },
 }
 
-DEFAULT_MODEL = "gemini-3-flash"
+DEFAULT_MODEL = "claude-opus-4"
 
 
 def get_model_config(model_key: str) -> dict:

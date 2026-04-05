@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 """
+⚠️  PARKED EXPERIMENT — references the parked ExtractionCoordinator work.
+    Not wired into active CI. Kept in-tree for later resumption. Do not
+    delete.  ⚠️
+
 bench_extraction.py — Parameter extraction benchmark harness.
 
 Runs `ParameterExtractor.extract_all_parameters_async` against an existing

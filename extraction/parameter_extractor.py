@@ -2,7 +2,6 @@
 import json
 import time
 import re
-from datetime import datetime
 
 from config.parameters import FACADE_PARAMETERS
 from config.models import AVAILABLE_MODELS, DEFAULT_MODEL, get_model_config
@@ -17,7 +16,7 @@ from sqlalchemy.orm import joinedload
 from processing.document_processor import logger
 
 import asyncio
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 # ── Constants ────────────────────────────────────────────────────────────────
 BATCH_SIZE       = 10    # params per LLM call for vector-search fallback (Pass 2)
@@ -27,24 +26,6 @@ SCORE_THRESHOLD  = 0.05  # low threshold — let Claude decide relevance, not ve
 FULL_CONTEXT_OVERLAP       = 3         # parent chunks overlap between windows
 TOKENS_PER_WORD            = 1.35      # average tokens per word estimate
 FULL_CONTEXT_PARAM_BATCH   = 25        # max params per LLM call in full-context mode
-
-# Parallel parameter shards per extraction pass. Each shard runs its own
-# Pass 1 + Pass 2 on the same prefetched chunks and writes disjoint rows,
-# so they race safely under the project-level advisory lock. Adaptive:
-# small param lists get fewer shards (no point spawning 4 tasks for 20
-# params); large lists cap at MAX_SHARD_COUNT so we don't saturate the
-# LLM semaphore on any single pass.
-MIN_PARAMS_PER_SHARD       = 20
-MAX_SHARD_COUNT            = 6
-MIN_SHARD_COUNT            = 1
-
-
-def _compute_shard_count(n_params: int) -> int:
-    """Target ~MIN_PARAMS_PER_SHARD params per shard, bounded by [1, MAX]."""
-    if n_params <= 0:
-        return 1
-    target = max(MIN_SHARD_COUNT, n_params // MIN_PARAMS_PER_SHARD)
-    return min(target, MAX_SHARD_COUNT)
 
 # ── Module-level LLM rate limiter ─────────────────────────────────────────────
 # Caps total concurrent Anthropic calls across ALL simultaneous pipeline runs.
@@ -57,44 +38,6 @@ def _get_llm_semaphore() -> asyncio.Semaphore:
     if _LLM_SEMAPHORE is None:
         _LLM_SEMAPHORE = asyncio.Semaphore(14)
     return _LLM_SEMAPHORE
-
-
-# Hard ceiling on LLM calls per extract_all_parameters_async invocation.
-# Prevents a pathological project (huge doc × many retries × sharding)
-# from silently burning through the budget. Tripping the ceiling aborts
-# further LLM calls for this pass; not-yet-extracted params return with
-# `reason="budget ceiling hit"`. Tune via the EXTRACTION_LLM_CALL_CEILING
-# environment variable.
-import os as _os
-LLM_CALL_CEILING_PER_PASS = int(_os.environ.get("EXTRACTION_LLM_CALL_CEILING", "200"))
-
-
-class _BudgetExceeded(Exception):
-    """Raised internally when a pass exceeds LLM_CALL_CEILING_PER_PASS."""
-    pass
-
-
-class PassBudget:
-    """Per-pass LLM call counter with a hard ceiling.
-
-    Thread-safe (asyncio single-threaded) counter threaded through the
-    extractor via `self._current_budget`. Each LLM call increments the
-    counter and raises `_BudgetExceeded` once the ceiling is hit. The
-    budget is reset on every `extract_all_parameters_async` invocation.
-    """
-
-    def __init__(self, ceiling: int = LLM_CALL_CEILING_PER_PASS):
-        self.ceiling = ceiling
-        self.calls = 0
-        self.aborted = False
-
-    def check_and_increment(self, label: str = "") -> None:
-        self.calls += 1
-        if self.calls > self.ceiling:
-            self.aborted = True
-            raise _BudgetExceeded(
-                f"LLM call ceiling {self.ceiling} exceeded at call #{self.calls} ({label})"
-            )
 
 
 class ParameterExtractor:
@@ -314,11 +257,7 @@ class ParameterExtractor:
     # PASS 1: FULL-CONTEXT EXTRACTION (like Claude Web — zero retrieval loss)
     # ══════════════════════════════════════════════════════════════════════════
 
-    def _fetch_all_parent_chunks(
-        self,
-        project_id: str,
-        document_ids: Optional[set] = None,
-    ) -> List[Dict]:
+    def _fetch_all_parent_chunks(self, project_id: str) -> List[Dict]:
         """Fetch ALL level-0 parent chunks for a project from ALL document types.
 
         Level-0 parents are created for:
@@ -328,10 +267,6 @@ class ParameterExtractor:
 
         If no level-0 parents exist (legacy data), falls back to level-1 children.
 
-        When ``document_ids`` is provided, only chunks belonging to those
-        documents are returned — used by streaming incremental passes to
-        process only newly-indexed docs without re-scanning the whole corpus.
-
         Returns chunks interleaved by document to ensure all document types
         get fair representation across context windows (no document is bunched
         at the end where it might be ignored).
@@ -339,38 +274,30 @@ class ParameterExtractor:
         from models.document import Document
 
         # 1. Fetch ALL level-0 parents (specs, drawings, docx, BOQ — all have them now)
-        base_q = (
+        all_parents = (
             self.db.query(DocumentChunk)
             .options(joinedload(DocumentChunk.document))
             .filter(
                 DocumentChunk.project_id == project_id,
                 DocumentChunk.chunk_level == 0,
             )
+            .order_by(DocumentChunk.document_id, DocumentChunk.page_number)
+            .all()
         )
-        if document_ids:
-            base_q = base_q.filter(DocumentChunk.document_id.in_(list(document_ids)))
-        all_parents = base_q.order_by(
-            DocumentChunk.document_id, DocumentChunk.page_number
-        ).all()
 
         if not all_parents:
             # Fallback: if no level-0 parents exist (legacy data), fetch all level-1 children
             logger.warning(f"[FULL_CONTEXT] No level-0 parents found — falling back to level-1 children")
-            fallback_q = (
+            all_parents = (
                 self.db.query(DocumentChunk)
                 .options(joinedload(DocumentChunk.document))
                 .filter(
                     DocumentChunk.project_id == project_id,
                     DocumentChunk.chunk_level == 1,
                 )
+                .order_by(DocumentChunk.document_id, DocumentChunk.page_number)
+                .all()
             )
-            if document_ids:
-                fallback_q = fallback_q.filter(
-                    DocumentChunk.document_id.in_(list(document_ids))
-                )
-            all_parents = fallback_q.order_by(
-                DocumentChunk.document_id, DocumentChunk.page_number
-            ).all()
             return [self._chunk_to_dict(p, score=1.0) for p in all_parents]
 
         # 2. Interleave chunks from different documents for balanced representation.
@@ -513,34 +440,20 @@ Return ONLY valid JSON — one key per parameter:
         self,
         project_id: str,
         facade_parameters: List[Dict],
-        document_ids_filter: Optional[set] = None,
-        prefetched_parent_chunks: Optional[List[Dict]] = None,
     ) -> List[Dict]:
         """Pass 1: Full-context extraction — send ALL document text to the LLM.
 
         Fetches all parent chunks from PostgreSQL (no Pinecone), splits into
         context windows, and makes one LLM call per window with ALL parameters.
         Merges results across windows keeping highest-confidence per param.
-
-        ``document_ids_filter`` narrows the fetch to only chunks from those
-        documents — used by streaming per-document incremental passes.
-
-        ``prefetched_parent_chunks`` lets the caller share a single DB fetch
-        across multiple concurrent shard invocations — used by sharded
-        Pass 1 in ``extract_all_parameters_async`` to avoid refetching the
-        same chunks N times.
         """
         t_start = time.perf_counter()
         loop = asyncio.get_running_loop()
 
-        # ── Fetch all parent chunks from DB (or use prefetched) ──
-        if prefetched_parent_chunks is not None:
-            parent_dicts = prefetched_parent_chunks
-        else:
-            parent_dicts = await loop.run_in_executor(
-                None,
-                lambda: self._fetch_all_parent_chunks(project_id, document_ids_filter),
-            )
+        # ── Fetch all parent chunks from DB ──
+        parent_dicts = await loop.run_in_executor(
+            None, self._fetch_all_parent_chunks, project_id
+        )
         total_tokens = sum(self._estimate_tokens(c['chunk_text']) for c in parent_dicts)
         logger.info(
             f"[FULL_CONTEXT] {len(parent_dicts)} parent chunks, "
@@ -569,24 +482,10 @@ Return ONLY valid JSON — one key per parameter:
                 for i in range(0, len(facade_parameters), param_batch_size)
             ]
 
-            # Run all param-batches inside a window in parallel. Each batch
-            # still acquires the module-level LLM semaphore individually, so
-            # this can't exceed the global concurrency ceiling — it just lets
-            # a window's batches race instead of waiting for each other.
-            async def _run_one_batch(batch_idx: int, param_batch: List[Dict]) -> List[Dict]:
+            all_window_results = []
+            for batch_idx, param_batch in enumerate(param_batches):
                 batch_label = f"Window {window_idx+1}/{len(windows)} batch {batch_idx+1}/{len(param_batches)}"
                 t0 = time.perf_counter()
-                # Budget guard: skip LLM call if the pass has already hit its ceiling.
-                budget = getattr(self, "_current_budget", None)
-                if budget is not None:
-                    try:
-                        budget.check_and_increment(batch_label)
-                    except _BudgetExceeded as be:
-                        logger.error(f"[FULL_CONTEXT] {batch_label} — {be}")
-                        return [
-                            {'parameter_name': p['name'], 'found': False, 'reason': 'budget ceiling hit'}
-                            for p in param_batch
-                        ]
                 try:
                     async with semaphore:
                         response_text = await asyncio.wait_for(
@@ -597,16 +496,18 @@ Return ONLY valid JSON — one key per parameter:
                         )
                 except asyncio.TimeoutError:
                     logger.error(f"[FULL_CONTEXT] {batch_label} timed out (240s)")
-                    return [
+                    all_window_results.extend([
                         {'parameter_name': p['name'], 'found': False, 'reason': 'LLM timeout'}
                         for p in param_batch
-                    ]
+                    ])
+                    continue
                 except Exception as e:
                     logger.error(f"[FULL_CONTEXT] {batch_label} LLM error: {e}")
-                    return [
+                    all_window_results.extend([
                         {'parameter_name': p['name'], 'found': False, 'reason': f'LLM error: {e}'}
                         for p in param_batch
-                    ]
+                    ])
+                    continue
 
                 elapsed = time.perf_counter() - t0
                 logger.info(
@@ -642,13 +543,6 @@ Return ONLY valid JSON — one key per parameter:
                                for r in results)
                     ]
                     if still_missing and len(still_missing) <= len(param_batch) * 0.6:
-                        # Budget guard for retry call
-                        if budget is not None:
-                            try:
-                                budget.check_and_increment(f"{batch_label} retry")
-                            except _BudgetExceeded as be:
-                                logger.error(f"[FULL_CONTEXT] {batch_label} retry skipped — {be}")
-                                return results
                         logger.info(f"[FULL_CONTEXT] {batch_label} — retrying {len(still_missing)} missing params")
                         try:
                             async with semaphore:
@@ -666,12 +560,9 @@ Return ONLY valid JSON — one key per parameter:
                         except Exception as e:
                             logger.warning(f"[FULL_CONTEXT] {batch_label} — retry failed: {e}")
 
-                return results
+                all_window_results.extend(results)
 
-            batch_results_list = await asyncio.gather(
-                *[_run_one_batch(i, b) for i, b in enumerate(param_batches)]
-            )
-            return [r for batch_results in batch_results_list for r in batch_results]
+            return all_window_results
 
         window_tasks = [
             _process_window(i, w) for i, w in enumerate(windows)
@@ -1183,15 +1074,6 @@ If found=false, explanation must clearly state: what terms were searched, what (
             max_sources = min(80, max(15, len(chunk_dicts)))
             context = self._build_context(chunk_dicts, max_sources=max_sources)
 
-            # ── Budget guard ──
-            budget = getattr(self, "_current_budget", None)
-            if budget is not None:
-                try:
-                    budget.check_and_increment(f"BATCH {batch_names[0]}")
-                except _BudgetExceeded as be:
-                    logger.error(f"[BATCH] Skipped — {be}")
-                    return [{'parameter_name': p['name'], 'found': False, 'reason': 'budget ceiling hit'} for p in batch_params]
-
             # ── LLM call — guarded by global rate limiter across all projects ──
             t0 = time.perf_counter()
             try:
@@ -1312,29 +1194,17 @@ If found=false, explanation must clearly state: what terms were searched, what (
         facade_parameters: List[Dict],
         max_concurrent: int = 6,
         num_docs: int = 1,
-        skip_vector_fallback: bool = False,
-        document_ids_filter: Optional[set] = None,
-        skip_persist_not_found: bool = False,
     ) -> List[Dict]:
         """Extract parameters using a three-pass strategy for maximum accuracy.
 
         Pass 1: FULL CONTEXT — send ALL document text, extract ALL params (like Claude Web)
         Pass 2: VECTOR SEARCH — targeted Pinecone search for still-missing params
         Pass 3: STORE — merge and persist all results
-
-        When ``skip_vector_fallback`` is True, Pass 2 is skipped — used by
-        streaming incremental passes where the corpus isn't complete yet
-        and vector fallback would waste an entire round of LLM calls only
-        to be re-run on the final pass.
         """
         t_all_start = time.perf_counter()
-        # Reset per-pass LLM call budget. Every LLM call made through the
-        # extractor checks `self._current_budget` and aborts the pass if
-        # the ceiling is hit (default 200 calls; tune via env var).
-        self._current_budget = PassBudget(ceiling=LLM_CALL_CEILING_PER_PASS)
         logger.info(
             f"[EXTRACT_ALL] Starting 3-pass extraction for {len(facade_parameters)} params "
-            f"| {num_docs} docs | budget ceiling={self._current_budget.ceiling}"
+            f"| {num_docs} docs"
         )
 
         # ── Create extraction run record ──
@@ -1361,104 +1231,56 @@ If found=false, explanation must clearly state: what terms were searched, what (
         except Exception as e:
             logger.warning(f"[EXTRACT_ALL] Could not create extraction run record: {e}")
 
-        # ═══════════ Prefetch parent chunks ONCE for all shards ═══════════
-        loop = asyncio.get_running_loop()
-        shared_parent_chunks = await loop.run_in_executor(
-            None,
-            lambda: self._fetch_all_parent_chunks(project_id, document_ids_filter),
+        # ═══════════ PASS 1: Full-context extraction ═══════════
+        all_results = await self._extract_full_context_async(
+            project_id, facade_parameters
         )
-
-        # ═══════════ Shard parameters for parallel Pass 1 + Pass 2 ═══════════
-        # Modulo slicing keeps shards balanced even if some params are
-        # systematically slower than others. Each shard runs its own
-        # Pass 1 (full-context) and Pass 2 (vector fallback) against the
-        # SAME prefetched chunks, concurrently under the LLM semaphore.
-        shard_count = _compute_shard_count(len(facade_parameters))
-        shards = [facade_parameters[i::shard_count] for i in range(shard_count)]
-        shards = [s for s in shards if s]
+        pass1_found = sum(1 for r in all_results if r.get('found'))
         logger.info(
-            f"[EXTRACT_ALL] Dispatching {len(facade_parameters)} params across "
-            f"{len(shards)} shards ({[len(s) for s in shards]})"
+            f"[EXTRACT_ALL] Pass 1 (full context): {pass1_found}/{len(all_results)} found — "
+            f"{time.perf_counter()-t_all_start:.2f}s"
         )
 
-        async def _run_shard(shard_idx: int, shard_params: List[Dict]) -> Tuple[int, List[Dict]]:
-            """Run Pass 1 + Pass 2 for a single parameter shard."""
-            t_shard = time.perf_counter()
-            shard_results = await self._extract_full_context_async(
-                project_id,
-                shard_params,
-                document_ids_filter=document_ids_filter,
-                prefetched_parent_chunks=shared_parent_chunks,
+        # ═══════════ PASS 2: Vector-search fallback for not-found params ═══════════
+        not_found_names = {r['parameter_name'] for r in all_results if not r.get('found')}
+        retry_params = [p for p in facade_parameters if p['name'] in not_found_names]
+
+        if retry_params:
+            logger.info(
+                f"[EXTRACT_ALL] Pass 2 (vector search): {len(retry_params)} not-found params"
             )
-            shard_pass1_found = sum(1 for r in shard_results if r.get('found'))
+            # Use smaller batch size for more focused context per param
+            retry_batch_size = 5
+            retry_batches = [
+                retry_params[i:i + retry_batch_size]
+                for i in range(0, len(retry_params), retry_batch_size)
+            ]
+            semaphore = asyncio.Semaphore(max_concurrent)
+            retry_tasks = [
+                self._extract_batch_async(project_id, batch, semaphore, num_docs)
+                for batch in retry_batches
+            ]
+            retry_results_raw = await asyncio.gather(*retry_tasks, return_exceptions=True)
 
-            # Pass 2: per-shard vector fallback. Fires as soon as this shard's
-            # Pass 1 finishes — no need to wait for peer shards.
-            shard_not_found = {
-                r['parameter_name'] for r in shard_results if not r.get('found')
-            }
-            shard_retry = [p for p in shard_params if p['name'] in shard_not_found]
-            if skip_vector_fallback:
-                shard_retry = []
+            # Merge: override not-found with found from vector search
+            retry_map: Dict[str, Dict] = {}
+            for rb, rr in zip(retry_batches, retry_results_raw):
+                if isinstance(rr, Exception):
+                    logger.error(f"[EXTRACT_ALL] Pass 2 batch exception: {rr}")
+                    continue
+                for r in rr:
+                    if r.get('found'):
+                        retry_map[r['parameter_name']] = r
 
-            if shard_retry:
-                retry_batch_size = 5
-                retry_batches = [
-                    shard_retry[i:i + retry_batch_size]
-                    for i in range(0, len(shard_retry), retry_batch_size)
-                ]
-                sem = asyncio.Semaphore(max_concurrent)
-                retry_tasks = [
-                    self._extract_batch_async(project_id, batch, sem, num_docs)
-                    for batch in retry_batches
-                ]
-                retry_results_raw = await asyncio.gather(
-                    *retry_tasks, return_exceptions=True
+            if retry_map:
+                logger.info(
+                    f"[EXTRACT_ALL] Pass 2 recovered {len(retry_map)} params: "
+                    f"{list(retry_map.keys())}"
                 )
-                retry_map: Dict[str, Dict] = {}
-                for rr in retry_results_raw:
-                    if isinstance(rr, Exception):
-                        logger.error(
-                            f"[EXTRACT_ALL] Shard {shard_idx+1} Pass 2 exc: {rr}"
-                        )
-                        continue
-                    for r in rr:
-                        if r.get('found'):
-                            retry_map[r['parameter_name']] = r
-                if retry_map:
-                    shard_results = [
-                        retry_map.get(r['parameter_name'], r) for r in shard_results
-                    ]
-
-            shard_duration = time.perf_counter() - t_shard
-            shard_found = sum(1 for r in shard_results if r.get('found'))
-            logger.info(
-                f"[EXTRACT_ALL] Shard {shard_idx+1}/{len(shards)}: "
-                f"{shard_found}/{len(shard_params)} found (pass1: {shard_pass1_found}) — "
-                f"{shard_duration:.2f}s"
-            )
-            # Structured per-shard metric for log aggregators / dashboards.
-            logger.info(
-                "[METRICS][SHARD] "
-                f"project_id={project_id} "
-                f"shard={shard_idx+1}/{len(shards)} "
-                f"params={len(shard_params)} "
-                f"pass1_found={shard_pass1_found} "
-                f"final_found={shard_found} "
-                f"pass2_recovered={shard_found - shard_pass1_found} "
-                f"duration_ms={int(shard_duration * 1000)}"
-            )
-            return shard_pass1_found, shard_results
-
-        shard_outputs = await asyncio.gather(
-            *[_run_shard(i, s) for i, s in enumerate(shards)]
-        )
-        pass1_found = sum(p for p, _ in shard_outputs)
-        all_results: List[Dict] = [r for _, sr in shard_outputs for r in sr]
-        logger.info(
-            f"[EXTRACT_ALL] All shards done: {sum(1 for r in all_results if r.get('found'))}/"
-            f"{len(all_results)} found — {time.perf_counter()-t_all_start:.2f}s"
-        )
+                for i, result in enumerate(all_results):
+                    pname = result.get('parameter_name')
+                    if pname in retry_map:
+                        all_results[i] = retry_map[pname]
 
         # ═══════════ PASS 3: Persist ALL results (found + not-found) ═══════════
         found_count = 0
@@ -1469,15 +1291,7 @@ If found=false, explanation must clearly state: what terms were searched, what (
             param_config = param_map.get(pname)
             if param_config:
                 try:
-                    # When running on a narrow doc subset, skip persisting
-                    # not-found results — the doc we're looking at simply may
-                    # not mention this param, but a later wider pass might.
-                    # Overwriting a previously-found value with not-found
-                    # would lose real data.
-                    if skip_persist_not_found and not result.get('found'):
-                        pass
-                    else:
-                        self._store_extraction(project_id, param_config, result)
+                    self._store_extraction(project_id, param_config, result)
                     if result.get('found'):
                         found_count += 1
                 except Exception as e:
@@ -1492,20 +1306,6 @@ If found=false, explanation must clearly state: what terms were searched, what (
 
         pass2_recovered = found_count - pass1_found
         extraction_time = time.perf_counter() - t_all_start
-
-        # Pass-level structured metric (wall-clock, budget, shard fan-out).
-        logger.info(
-            "[METRICS][EXTRACT_ALL] "
-            f"project_id={project_id} "
-            f"total_params={len(all_results)} "
-            f"found={found_count} "
-            f"pass1_found={pass1_found} "
-            f"pass2_recovered={pass2_recovered} "
-            f"shards={len(shards)} "
-            f"llm_calls={self._current_budget.calls} "
-            f"budget_aborted={self._current_budget.aborted} "
-            f"duration_ms={int(extraction_time * 1000)}"
-        )
 
         # ── Update extraction run record if present ──
         if hasattr(self, '_current_run_id') and self._current_run_id:
@@ -1573,354 +1373,3 @@ If found=false, explanation must clearly state: what terms were searched, what (
         context      = self._build_context(chunk_dicts, max_sources=5)
         response_text = self._call_llm(param_config, context)
         return self._parse_llm_response(response_text, param_config, chunk_dicts)
-
-    # ────────────────────────────────────────────────────────────────────
-    # Streaming extraction entry point
-    # ────────────────────────────────────────────────────────────────────
-
-    # How many consecutive unchanged passes promote a parameter from
-    # `tentative` → `stable`. Stable params with high confidence are
-    # skipped in subsequent incremental passes until the corpus changes.
-    _STABLE_PROMOTION_THRESHOLD = 2
-    # Confidence floor below which we always re-extract.
-    _STABLE_CONFIDENCE_FLOOR = 0.85
-
-    async def extract_incremental(
-        self,
-        project_id: str,
-        facade_parameters: List[Dict],
-        is_final: bool = False,
-        on_param_update=None,
-        new_document_ids: Optional[set] = None,
-    ) -> Dict:
-        """Run an incremental (or final) parameter extraction pass.
-
-        Called by `ExtractionCoordinator` once per debounced batch of
-        newly-indexed documents. Uses an evidence fingerprint over the
-        current set of level-0 parent chunks to decide whether re-running
-        the LLM is even worth it.
-
-        • If the fingerprint is unchanged since the last incremental pass
-          AND ``is_final`` is False, the whole pass is skipped (no LLM calls).
-        • Otherwise, parameters that are already `stable`/`final` with
-          confidence ≥ _STABLE_CONFIDENCE_FLOOR are skipped individually;
-          only the remaining parameters are sent to the LLM.
-        • After extraction, each touched row has its lifecycle fields
-          updated: `evidence_fingerprint`, `last_changed_at` (only when the
-          value actually flipped), `change_count`, `history`, and
-          `lifecycle_status` promoted per the rules below.
-
-        Lifecycle transitions:
-            new             → tentative
-            tentative  (unchanged for _STABLE_PROMOTION_THRESHOLD passes) → stable
-            any        (value flipped >2 times) → conflict
-            any        (is_final=True)          → final
-
-        Parameters
-        ----------
-        project_id      : project UUID string
-        facade_parameters : parameter configs filtered by project_type
-        is_final        : final pass flag — promotes all rows to final
-        on_param_update : optional async callback invoked with a dict
-                          `{parameter_name, value, confidence, sources,
-                            lifecycle_status, changed}` so the coordinator
-                          can stream events to the UI.
-
-        Returns
-        -------
-        dict:
-            updated     : list of parameter_name whose value changed
-            new         : list of parameter_name inserted for the first time
-            unchanged   : list of parameter_name skipped or re-confirmed
-            total_found : int — params with a value after this pass
-            skipped_pass: bool — True if nothing was re-extracted at all
-        """
-        from models.extracted_parameter import (
-            ExtractedParameter,
-            LIFECYCLE_FINAL,
-            LIFECYCLE_STABLE,
-            LIFECYCLE_TENTATIVE,
-            LIFECYCLE_CONFLICT,
-            CONFLICT_CHANGE_THRESHOLD,
-        )
-
-        # ── 1. Compute current evidence fingerprint ─────────────────────────
-        # Always use the FULL corpus for fingerprint computation so lifecycle
-        # decisions are based on the complete state, not just the narrow slice
-        # being extracted this pass.
-        parent_chunks = await asyncio.get_event_loop().run_in_executor(
-            None, self._fetch_all_parent_chunks, project_id
-        )
-        # Narrow fetch (only new docs) drives extraction context below.
-        narrow_parent_chunks = parent_chunks
-        if new_document_ids and not is_final:
-            narrow_parent_chunks = [
-                c for c in parent_chunks
-                if c.get("document_id") in new_document_ids
-            ]
-            logger.info(
-                f"[EXTRACT_INCREMENTAL] Narrow-scope extraction: "
-                f"{len(narrow_parent_chunks)}/{len(parent_chunks)} chunks "
-                f"from {len(new_document_ids)} new docs"
-            )
-        chunk_ids = [c.get("chunk_id") for c in parent_chunks if c.get("chunk_id")]
-        current_fingerprint = ExtractedParameter.compute_fingerprint(chunk_ids)
-
-        logger.info(
-            f"[EXTRACT_INCREMENTAL] project={project_id[:8]} is_final={is_final} "
-            f"parent_chunks={len(parent_chunks)} fp={current_fingerprint[:10]}"
-        )
-
-        # ── 2. Snapshot existing rows ───────────────────────────────────────
-        existing_rows = (
-            self.db.query(ExtractedParameter)
-            .filter(ExtractedParameter.project_id == project_id)
-            .all()
-        )
-        existing_map = {r.parameter_name: r for r in existing_rows}
-
-        # Snapshot pre-extraction values keyed by name so we can detect flips.
-        prior_values: Dict[str, Dict] = {}
-        for r in existing_rows:
-            prior_values[r.parameter_name] = {
-                "value_text": r.value_text,
-                "value_numeric": float(r.value_numeric) if r.value_numeric is not None else None,
-                "confidence": float(r.confidence_score) if r.confidence_score is not None else None,
-                "fingerprint": r.evidence_fingerprint,
-                "lifecycle_status": r.lifecycle_status or LIFECYCLE_TENTATIVE,
-                "change_count": r.change_count or 0,
-            }
-
-        # ── 3. Decide whether to skip the whole pass ────────────────────────
-        # Only skip if EVERY existing row already has the current fingerprint
-        # and there are no parameters missing from the DB. The final pass
-        # never short-circuits.
-        all_params_present = all(
-            p["name"] in existing_map for p in facade_parameters
-        )
-        all_fingerprints_match = existing_rows and all(
-            (r.evidence_fingerprint or "") == current_fingerprint for r in existing_rows
-        )
-        if (not is_final) and all_params_present and all_fingerprints_match:
-            logger.info(
-                f"[EXTRACT_INCREMENTAL] Fingerprint unchanged — skipping pass entirely"
-            )
-            return {
-                "updated": [],
-                "new": [],
-                "unchanged": [p["name"] for p in facade_parameters],
-                "total_found": sum(1 for r in existing_rows if r.value_text),
-                "skipped_pass": True,
-            }
-
-        # ── 4. Build re-extract filter list ─────────────────────────────────
-        # Skip individual params that are already stable/final with good
-        # confidence AND whose fingerprint hasn't moved.
-        to_extract: List[Dict] = []
-        skipped: List[str] = []
-        for p in facade_parameters:
-            name = p["name"]
-            row = existing_map.get(name)
-            if row is None:
-                to_extract.append(p)
-                continue
-            conf = float(row.confidence_score) if row.confidence_score is not None else 0.0
-            status = row.lifecycle_status or LIFECYCLE_TENTATIVE
-            fp_match = (row.evidence_fingerprint or "") == current_fingerprint
-            is_confident = conf >= self._STABLE_CONFIDENCE_FLOOR
-            is_locked = status in (LIFECYCLE_STABLE, LIFECYCLE_FINAL)
-            # On the final pass, re-run anything not yet confidently answered
-            # so Pass 2 vector search can recover missing params.
-            if is_final:
-                if row.value_text and is_confident and is_locked:
-                    skipped.append(name)
-                else:
-                    to_extract.append(p)
-            else:
-                if is_locked and is_confident and fp_match:
-                    skipped.append(name)
-                else:
-                    to_extract.append(p)
-
-        logger.info(
-            f"[EXTRACT_INCREMENTAL] Re-extracting {len(to_extract)} params, "
-            f"skipping {len(skipped)} (stable+confident)"
-        )
-
-        # ── 5. Run the existing full-context extractor on the filtered list ─
-        updated: List[str] = []
-        new_list: List[str] = []
-        extractions: List[Dict] = []
-        if to_extract:
-            narrow_run = bool(new_document_ids) and not is_final
-            extractions = await self.extract_all_parameters_async(
-                project_id=project_id,
-                facade_parameters=to_extract,
-                max_concurrent=10,
-                num_docs=len({c.get("document_id") for c in narrow_parent_chunks if c.get("document_id")}) or 1,
-                # Incremental passes skip Pass 2 vector fallback — the final
-                # pass will run it once the entire corpus is indexed.
-                skip_vector_fallback=not is_final,
-                # Scope LLM context to newly-arrived docs on narrow passes.
-                document_ids_filter=(new_document_ids if narrow_run else None),
-                # Don't clobber previously-found values with not-found when
-                # the new doc simply doesn't mention that param.
-                skip_persist_not_found=narrow_run,
-            )
-
-        # ── 6. Merge results + update lifecycle fields ──────────────────────
-        # Re-query so we see the rows `extract_all_parameters_async` just
-        # upserted with their new values.
-        self.db.expire_all()
-        touched_rows = (
-            self.db.query(ExtractedParameter)
-            .filter(
-                ExtractedParameter.project_id == project_id,
-                ExtractedParameter.parameter_name.in_([p["name"] for p in to_extract]) if to_extract else False,
-            )
-            .all()
-        ) if to_extract else []
-
-        # Confidence margin required for a new value to overwrite an older one.
-        # Below this the extraction is considered "noise" and we keep the prior.
-        _MERGE_CONFIDENCE_MARGIN = 0.05
-
-        for row in touched_rows:
-            name = row.parameter_name
-            prior = prior_values.get(name)
-            new_value = row.value_text
-            new_conf = float(row.confidence_score) if row.confidence_score is not None else None
-
-            is_new = prior is None
-            value_changed = False
-            if not is_new:
-                old_value = prior.get("value_text")
-                value_changed = (old_value or "") != (new_value or "") and (new_value is not None)
-
-            # ── Merge rollback: if a re-extraction produced a different value
-            # with materially lower confidence than the existing one, discard
-            # the new value and restore the prior. Prevents a noisy pass from
-            # clobbering a stable answer. Final passes bypass this guard so
-            # Pass 2 vector search results can still land.
-            if (
-                not is_new
-                and value_changed
-                and not is_final
-                and prior.get("confidence") is not None
-                and new_conf is not None
-                and new_conf < (prior.get("confidence") or 0) - _MERGE_CONFIDENCE_MARGIN
-            ):
-                logger.info(
-                    f"[EXTRACT_INCREMENTAL] Rollback {name}: new_conf={new_conf:.2f} "
-                    f"< prior_conf={prior.get('confidence'):.2f} — keeping prior value"
-                )
-                row.value_text = prior.get("value_text")
-                if prior.get("value_numeric") is not None:
-                    row.value_numeric = prior.get("value_numeric")
-                row.confidence_score = prior.get("confidence")
-                # Reset change detection so we don't double-count the aborted flip
-                value_changed = False
-                new_value = row.value_text
-                new_conf = prior.get("confidence")
-
-            # Update lifecycle fields on the row
-            row.evidence_fingerprint = current_fingerprint
-            if is_new:
-                row.lifecycle_status = LIFECYCLE_FINAL if is_final else LIFECYCLE_TENTATIVE
-                row.change_count = 0
-                row.last_changed_at = datetime.utcnow() if new_value else None
-                new_list.append(name)
-            elif value_changed:
-                # Archive the prior value into history, bump counter.
-                try:
-                    row.append_history(
-                        value=prior.get("value_text"),
-                        confidence=prior.get("confidence"),
-                        sources=None,
-                    )
-                except Exception:
-                    pass
-                row.change_count = (prior.get("change_count") or 0) + 1
-                row.last_changed_at = datetime.utcnow()
-                if is_final:
-                    row.lifecycle_status = LIFECYCLE_FINAL
-                elif row.change_count > CONFLICT_CHANGE_THRESHOLD:
-                    row.lifecycle_status = LIFECYCLE_CONFLICT
-                else:
-                    row.lifecycle_status = LIFECYCLE_TENTATIVE
-                updated.append(name)
-            else:
-                # Same value across passes — promotion candidate.
-                if is_final:
-                    row.lifecycle_status = LIFECYCLE_FINAL
-                elif (prior.get("lifecycle_status") == LIFECYCLE_TENTATIVE):
-                    # Promote to stable after one unchanged re-extraction at
-                    # good confidence.
-                    if new_conf is not None and new_conf >= self._STABLE_CONFIDENCE_FLOOR:
-                        row.lifecycle_status = LIFECYCLE_STABLE
-
-        # ── 7. Update lifecycle for skipped-but-present rows ────────────────
-        for name in skipped:
-            row = existing_map.get(name)
-            if row is None:
-                continue
-            row.evidence_fingerprint = current_fingerprint
-            if is_final:
-                row.lifecycle_status = LIFECYCLE_FINAL
-
-        self.db.commit()
-
-        # ── 8. Fire per-param callbacks ─────────────────────────────────────
-        if on_param_update is not None:
-            # Touched rows (extracted this pass)
-            for row in touched_rows:
-                try:
-                    await on_param_update({
-                        "parameter_name": row.parameter_name,
-                        "value": row.value_text,
-                        "confidence": float(row.confidence_score) if row.confidence_score is not None else None,
-                        "unit": row.unit,
-                        "lifecycle_status": row.lifecycle_status,
-                        "sources": row.all_sources,
-                        "change_count": row.change_count or 0,
-                        "changed": (row.parameter_name in updated) or (row.parameter_name in new_list),
-                    })
-                except Exception as cb_err:
-                    logger.warning(f"[EXTRACT_INCREMENTAL] callback error: {cb_err}")
-            # Also emit for skipped rows when this is the final pass, so the
-            # UI can flip their chip from stable → final.
-            if is_final:
-                for name in skipped:
-                    row = existing_map.get(name)
-                    if row is None:
-                        continue
-                    try:
-                        await on_param_update({
-                            "parameter_name": row.parameter_name,
-                            "value": row.value_text,
-                            "confidence": float(row.confidence_score) if row.confidence_score is not None else None,
-                            "unit": row.unit,
-                            "lifecycle_status": row.lifecycle_status,
-                            "sources": row.all_sources,
-                            "change_count": row.change_count or 0,
-                            "changed": False,
-                        })
-                    except Exception:
-                        pass
-
-        total_found = (
-            self.db.query(ExtractedParameter)
-            .filter(
-                ExtractedParameter.project_id == project_id,
-                ExtractedParameter.value_text.isnot(None),
-            )
-            .count()
-        )
-
-        return {
-            "updated": updated,
-            "new": new_list,
-            "unchanged": skipped,
-            "total_found": total_found,
-            "skipped_pass": False,
-        }

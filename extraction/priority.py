@@ -1,4 +1,7 @@
 """
+⚠️  PARKED EXPERIMENT — NOT ACTIVE AS OF 2026-04-05. Kept in-tree for
+    later resumption of the streaming-extraction work. Do not delete.  ⚠️
+
 priority.py
 ───────────
 Document-type priority table used as a tiebreaker during incremental
