@@ -740,7 +740,9 @@ class DocumentProcessor:
             #   (auto-detects drawings vs scanned text vs tables vs forms)
             from parsing.drawing_pdf_parser import DrawingPDFParser
             parser = DrawingPDFParser(ocr_engine=self.ocr_engine)
-            parsed_content, page_count, parse_stats = parser.parse_with_page_count(document.file_path)
+            parsed_content, page_count, parse_stats = parser.parse_with_page_count(
+                document.file_path, file_type=document.file_type
+            )
             document.page_count = page_count
 
             # Handle parse errors (password-protected, corrupt, etc.)

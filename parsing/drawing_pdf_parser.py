@@ -28,7 +28,7 @@ import logging
 import os
 import threading
 import time
-from typing import List, Dict, Tuple
+from typing import List, Dict, Optional, Tuple
 
 import fitz  # PyMuPDF
 from google import genai
@@ -41,6 +41,13 @@ logger = logging.getLogger(__name__)
 
 # Pages with fewer extractable chars than this are treated as image pages
 MIN_TEXT_CHARS = 100
+# Pages with this many chars or more are treated as dense text (skip the
+# vector-density check — no CAD page has 3k+ chars of callouts in practice)
+DENSE_TEXT_THRESHOLD = 3000
+# Pages with this many vector draw commands are treated as CAD/drawing pages
+# regardless of their text char count. Text pages with layout borders have
+# <500; CAD drawings with real geometry have 1000s-10000s.
+VECTOR_DENSITY_THRESHOLD = 1000
 # DPI for rendering image pages — 200 gives clear annotations for dimensions/notes
 RENDER_DPI = 200
 # Reduced DPI for large documents (>50 vision pages) — faster rendering + smaller PNGs
@@ -152,7 +159,9 @@ class DrawingPDFParser:
         blocks, _, _ = self.parse_with_page_count(pdf_path)
         return blocks
 
-    def parse_with_page_count(self, pdf_path: str) -> Tuple[List[Dict], int, Dict]:
+    def parse_with_page_count(
+        self, pdf_path: str, file_type: Optional[str] = None
+    ) -> Tuple[List[Dict], int, Dict]:
         blocks: List[Dict] = []
         current_section: str | None = None
         current_subsection: str | None = None
@@ -188,10 +197,15 @@ class DrawingPDFParser:
             logger.info(f"[HYBRID_PDF] '{pdf_path}': encrypted but no user password — opened OK")
 
         total_pages = len(fitz_doc)
+        # Per-page vector-density routing (see Phase 1 loop) is the real
+        # defense against the pdfplumber O(edges²) cliff on CAD geometry —
+        # CAD pages are routed to vision regardless of filename, so
+        # pdfplumber only sees genuine text pages. `skip_tables` is kept
+        # purely as the existing very-large-doc guard.
         skip_tables = total_pages > SKIP_TABLES_ABOVE_PAGES
         logger.info(
             f"[HYBRID_PDF] {pdf_path}: {total_pages} pages "
-            f"(tables={'skip' if skip_tables else 'extract'})"
+            f"(tables={'skip' if skip_tables else 'extract'}, hint={file_type or 'unknown'})"
         )
 
         # Track vision page types for stats
@@ -204,16 +218,53 @@ class DrawingPDFParser:
             text_page_indices = []
             vision_page_indices = []
 
+            # Per-page classification using char count + vector density.
+            # Three buckets:
+            #   char_count < MIN_TEXT_CHARS        → vision (sparse text,
+            #                                         typical scanned/image)
+            #   char_count >= DENSE_TEXT_THRESHOLD → text (fast path, no
+            #                                         vector check needed)
+            #   in between                         → vector density decides:
+            #     draws > VECTOR_DENSITY_THRESHOLD → vision (CAD with
+            #                                         callouts — avoids
+            #                                         pdfplumber O(edges²)
+            #                                         cliff AND preserves
+            #                                         spatial layout)
+            #     otherwise                        → text
+            vision_by_density = 0
             for page_idx in range(total_pages):
                 fitz_page = fitz_doc[page_idx]
                 page_text = fitz_page.get_text("text").strip()
-                if len(page_text) >= MIN_TEXT_CHARS:
+                char_count = len(page_text)
+
+                if char_count < MIN_TEXT_CHARS:
+                    if vision_count < MAX_VISION_PAGES:
+                        vision_page_indices.append(page_idx)
+                        vision_count += 1
+                    else:
+                        vision_skipped += 1
+                elif char_count >= DENSE_TEXT_THRESHOLD:
                     text_page_indices.append(page_idx)
-                elif vision_count < MAX_VISION_PAGES:
-                    vision_page_indices.append(page_idx)
-                    vision_count += 1
                 else:
-                    vision_skipped += 1
+                    # Ambiguous: check vector density. get_drawings() is
+                    # ~10-50ms/page, so we only call it in this band.
+                    draws = len(fitz_page.get_drawings())
+                    if draws > VECTOR_DENSITY_THRESHOLD:
+                        if vision_count < MAX_VISION_PAGES:
+                            vision_page_indices.append(page_idx)
+                            vision_count += 1
+                            vision_by_density += 1
+                        else:
+                            vision_skipped += 1
+                    else:
+                        text_page_indices.append(page_idx)
+
+            if vision_by_density:
+                logger.info(
+                    f"[HYBRID_PDF] Vector-density routing: "
+                    f"{vision_by_density} ambiguous pages sent to vision "
+                    f"(>{VECTOR_DENSITY_THRESHOLD} draws, <{DENSE_TEXT_THRESHOLD} chars)"
+                )
 
             # ── Adaptive DPI: reduce for large documents ────────────────────
             render_dpi = RENDER_DPI

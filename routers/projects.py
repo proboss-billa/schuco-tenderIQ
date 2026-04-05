@@ -15,7 +15,7 @@ from core.database import get_db
 from models.document import Document
 from models.document_chunk import DocumentChunk
 from models.project import Project
-from services.file_classifier import classify_file_type
+from services.file_classifier import classify_content_type
 from services.pipeline import _run_pipeline
 
 logger = logging.getLogger("tenderiq.projects")
@@ -71,7 +71,6 @@ async def create_project(
     saved_documents = []
     total_size = 0
     for file in files:
-        file_type = classify_file_type(file.filename)
         file_path = upload_dir / file.filename
         file_size = 0
         async with aiofiles.open(str(file_path), "wb") as buffer:
@@ -92,6 +91,11 @@ async def create_project(
                 status_code=413,
                 detail="Total upload size exceeds 500 MB limit.",
             )
+
+        # Classify AFTER save so content sampling can catch CAD drawings
+        # with generic filenames (e.g. "1.pdf", "scan.pdf"). Falls back to
+        # filename-only classification if content sampling fails.
+        file_type = classify_content_type(file.filename, str(file_path))
 
         document = Document(
             project_id=project.project_id,

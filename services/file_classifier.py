@@ -121,7 +121,11 @@ def classify_content_type(filename: str, file_path: str) -> str:
     if base_type == "pdf_drawing":
         return base_type
 
-    # Content-sample to catch drawings with non-standard filenames
+    # Content-sample to catch drawings with non-standard filenames.
+    # Two signals: avg text chars per page AND avg vector draw commands.
+    # Char count alone misses CAD drawings with 600-2700 chars of callouts;
+    # draw-command count catches them because CAD pages have 1000s of vector
+    # paths while text pages have <500 (layout borders, rules).
     try:
         import fitz
         doc = fitz.open(file_path)
@@ -130,16 +134,29 @@ def classify_content_type(filename: str, file_path: str) -> str:
             doc.close()
             return base_type
 
-        total_chars = sum(
-            len(doc[i].get_text("text").strip()) for i in range(sample_n)
-        )
+        total_chars = 0
+        total_draws = 0
+        for i in range(sample_n):
+            page = doc[i]
+            total_chars += len(page.get_text("text").strip())
+            total_draws += len(page.get_drawings())
         doc.close()
         avg_chars = total_chars / sample_n
+        avg_draws = total_draws / sample_n
 
+        # Pure scanned drawings (original heuristic)
         if avg_chars < 100:
             logger.info(
                 f"[CLASSIFY] '{filename}': avg {avg_chars:.0f} chars/page "
                 f"→ reclassified as pdf_drawing (was {base_type})"
+            )
+            return "pdf_drawing"
+        # CAD drawings with callouts: high vector density regardless of text
+        if avg_draws > 500:
+            logger.info(
+                f"[CLASSIFY] '{filename}': avg {avg_draws:.0f} draws/page "
+                f"(chars={avg_chars:.0f}) → reclassified as pdf_drawing "
+                f"(was {base_type})"
             )
             return "pdf_drawing"
     except Exception as e:
