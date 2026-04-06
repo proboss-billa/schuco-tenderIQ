@@ -35,3 +35,13 @@ def login(email: str, password: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     token = create_access_token({"sub": str(user.user_id)})
     return {"access_token": token, "token_type": "bearer"}
+
+
+@router.get("/debug/packages")
+def debug_packages():
+    from importlib.metadata import version, packages_distributions
+    return {
+        "mistralai_version": version("mistralai"),
+        "python_path": __import__("sys").path,
+        "mistralai_location": str(packages_distributions().get("mistralai"))
+    }
