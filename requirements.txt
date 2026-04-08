@@ -17,6 +17,7 @@ anthropic>=0.42.0
 openai>=1.30.0
 tenacity>=8.0.0
 requests>=2.31.0
+resend>=2.0.0
 passlib[bcrypt,argon2]==1.7.4
 python-jose==3.3.0
 ezdxf>=1.1.0

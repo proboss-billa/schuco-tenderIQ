@@ -75,4 +75,15 @@ class Document(Base):
         nullable=True
     )
 
+    is_archived: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default="false",
+    )
+
+    archived_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP,
+        nullable=True,
+    )
+
     project = relationship("Project", backref="documents")

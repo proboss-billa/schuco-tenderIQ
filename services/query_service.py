@@ -91,11 +91,14 @@ def _correct_query(raw_query: str) -> str:
             return corrected
         return raw_query
     except Exception as e:
+        err_str = str(e).lower()
+        if "resource_exhausted" in err_str or "429" in err_str or "quota" in err_str:
+            raise  # let caller handle quota errors
         logger.warning(f"[QUERY] Spell-correction failed (using original): {e}")
         return raw_query
 
 
-def process_query(project_id: uuid.UUID, query: str, db: Session, model_key: str = None) -> dict:
+def process_query(project_id: uuid.UUID, query: str, db: Session, model_key: str = None) -> dict:  # noqa: C901
     """Execute an ad-hoc query against project documents and return answer + sources."""
 
     # ── Spell-correct / expand query before embedding ───────────────────────
@@ -217,6 +220,7 @@ def process_query(project_id: uuid.UUID, query: str, db: Session, model_key: str
         question_text = f"{corrected_query}\n(Original user query with possible typos: {query})"
 
     user_content = f"{chat_history}Question: {question_text}\n\nDocument Context:\n{context}"
+    tokens_used = 0
 
     if provider == "google":
         if gemini_client is None:
@@ -233,7 +237,16 @@ def process_query(project_id: uuid.UUID, query: str, db: Session, model_key: str
                 ),
             )
             answer = resp.text
+            if hasattr(resp, "usage_metadata") and resp.usage_metadata:
+                tokens_used = (
+                    getattr(resp.usage_metadata, "prompt_token_count", 0)
+                    + getattr(resp.usage_metadata, "candidates_token_count", 0)
+                )
         except Exception as e:
+            err_str = str(e).lower()
+            if "resource_exhausted" in err_str or "429" in err_str or "quota" in err_str:
+                logger.warning(f"[QUERY] Gemini quota exhausted: {e}")
+                raise HTTPException(status_code=402, detail="OUT_OF_CREDITS")
             logger.error(f"[QUERY] Gemini error: {e}")
             raise HTTPException(status_code=502, detail=f"AI service error: {e}")
     elif provider == "openai":
@@ -251,6 +264,8 @@ def process_query(project_id: uuid.UUID, query: str, db: Session, model_key: str
                 ],
             )
             answer = response.choices[0].message.content
+            if hasattr(response, "usage") and response.usage:
+                tokens_used = response.usage.total_tokens or 0
         except Exception as e:
             logger.error(f"[QUERY] OpenAI error: {e}")
             raise HTTPException(status_code=502, detail=f"AI service error: {e}")
@@ -267,6 +282,11 @@ def process_query(project_id: uuid.UUID, query: str, db: Session, model_key: str
                 messages=[{"role": "user", "content": user_content}],
             )
             answer = response.content[0].text
+            if hasattr(response, "usage") and response.usage:
+                tokens_used = (
+                    getattr(response.usage, "input_tokens", 0)
+                    + getattr(response.usage, "output_tokens", 0)
+                )
         except anthropic.APITimeoutError:
             logger.warning(f"[QUERY] LLM timed out for project {project_id}")
             raise HTTPException(status_code=504, detail="AI response timed out. Try a shorter question.")
@@ -302,4 +322,5 @@ def process_query(project_id: uuid.UUID, query: str, db: Session, model_key: str
         "query": query,
         "answer": answer,
         "sources": sources,
+        "tokens_used": tokens_used,
     }

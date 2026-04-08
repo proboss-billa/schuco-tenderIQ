@@ -40,6 +40,11 @@ def _get_llm_semaphore() -> asyncio.Semaphore:
     return _LLM_SEMAPHORE
 
 
+class QuotaExhaustedError(Exception):
+    """Raised when the LLM API key quota is exhausted (e.g. Gemini 429 / RESOURCE_EXHAUSTED)."""
+    pass
+
+
 class ParameterExtractor:
     """Extract facade parameters using batched LLM calls for speed and quality."""
 
@@ -66,6 +71,9 @@ class ParameterExtractor:
         elif self.provider == "openai":
             from core.clients import openai_client
             self.openai = openai_client
+
+        # Token usage counter — accumulated across all _call_provider calls
+        self._extraction_tokens_used = 0
 
         logger.info(
             f"[EXTRACTOR] Using model: {self.model_config['display_name']} "
@@ -144,7 +152,10 @@ class ParameterExtractor:
         return max(15, min(max_batch, FULL_CONTEXT_PARAM_BATCH))
 
     def _call_provider(self, system: str, prompt: str, max_tokens: int) -> str:
-        """Route LLM call to the configured provider (Anthropic, Google, or OpenAI)."""
+        """Route LLM call to the configured provider (Anthropic, Google, or OpenAI).
+        Also tracks token usage on self._extraction_tokens_used.
+        Raises QuotaExhaustedError if the Gemini API key quota is exceeded."""
+        tokens = 0
         if self.provider == "anthropic":
             response = self.anthropic.messages.create(
                 model=self.model_id,
@@ -153,19 +164,32 @@ class ParameterExtractor:
                 system=system,
                 messages=[{"role": "user", "content": prompt}],
             )
-            return response.content[0].text
+            text = response.content[0].text
+            if hasattr(response, "usage") and response.usage:
+                tokens = getattr(response.usage, "input_tokens", 0) + getattr(response.usage, "output_tokens", 0)
         elif self.provider == "google":
             from google import genai
-            response = self.gemini.models.generate_content(
-                model=self.model_id,
-                contents=prompt,
-                config=genai.types.GenerateContentConfig(
-                    temperature=0.05,
-                    max_output_tokens=max_tokens,
-                    system_instruction=system,
-                ),
-            )
-            return response.text
+            try:
+                response = self.gemini.models.generate_content(
+                    model=self.model_id,
+                    contents=prompt,
+                    config=genai.types.GenerateContentConfig(
+                        temperature=0.05,
+                        max_output_tokens=max_tokens,
+                        system_instruction=system,
+                    ),
+                )
+            except Exception as e:
+                err_str = str(e).lower()
+                if "resource_exhausted" in err_str or "429" in err_str or "quota" in err_str:
+                    raise QuotaExhaustedError("Gemini API quota exhausted") from e
+                raise
+            text = response.text
+            if hasattr(response, "usage_metadata") and response.usage_metadata:
+                tokens = (
+                    getattr(response.usage_metadata, "prompt_token_count", 0)
+                    + getattr(response.usage_metadata, "candidates_token_count", 0)
+                )
         elif self.provider == "openai":
             if self.openai is None:
                 raise RuntimeError("OpenAI client not initialized. Check OPENAI_API_KEY.")
@@ -178,9 +202,14 @@ class ParameterExtractor:
                     {"role": "user", "content": prompt},
                 ],
             )
-            return response.choices[0].message.content
+            text = response.choices[0].message.content
+            if hasattr(response, "usage") and response.usage:
+                tokens = response.usage.total_tokens or 0
         else:
             raise ValueError(f"Unknown provider: {self.provider}")
+
+        self._extraction_tokens_used += tokens
+        return text
 
     def _fetch_chunks_from_db(self, session, chunk_ids: List[str], scores: Dict) -> List[Dict]:
         """Fetch chunks from DB, expand to parents, return sorted by score."""

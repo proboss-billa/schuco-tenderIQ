@@ -3,15 +3,21 @@ import uuid
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
 
+from auth.utils import get_current_user
 from core.database import get_db
 from core.logging import _project_timings
 from models.project import Project
+from models.user import User
 
 router = APIRouter(prefix="", tags=["timings"])
 
 
 @router.get("/projects/{project_id}/timings")
-async def get_project_timings(project_id: uuid.UUID, db: Session = Depends(get_db)):
+async def get_project_timings(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Return captured [TIMING] log entries for a project, split into summary and details."""
     project = db.query(Project).filter(Project.project_id == project_id).first()
     if not project:

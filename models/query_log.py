@@ -24,7 +24,7 @@ class QueryLog(Base):
 
     project_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("projects.project_id")
+        ForeignKey("projects.project_id", ondelete="CASCADE")
     )
 
     query_text: Mapped[str] = mapped_column(Text, nullable=False)
