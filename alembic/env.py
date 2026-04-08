@@ -31,6 +31,7 @@ import models.user                              # noqa: E402, F401
 import models.query_log                         # noqa: E402, F401
 import models.boq_item                          # noqa: E402, F401
 import models.extraction_run                    # noqa: E402, F401
+import models.email_otp                         # noqa: E402, F401
 
 target_metadata = Base.metadata
 

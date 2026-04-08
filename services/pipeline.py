@@ -9,7 +9,7 @@ from config.parameters import FACADE_PARAMETERS
 from core.clients import pinecone_index, embedding_client
 from core.database import SessionLocal
 from core.logging import _timing_project_id, _project_timings, _pipeline_log
-from extraction.parameter_extractor import ParameterExtractor
+from extraction.parameter_extractor import ParameterExtractor, QuotaExhaustedError
 from models.document import Document
 from models.project import Project
 from processing.document_processor import DocumentProcessor
@@ -329,6 +329,15 @@ async def _run_pipeline_inner(project_id: uuid.UUID, model_key: str = None, ocr_
                 f"{_time.perf_counter() - t_extract:.2f}s -- "
                 f"{found_count}/{len(extractions)} params found"
             )
+
+            # Custom token tracking (parked) — deduct extraction tokens from the project owner
+            # extraction_tokens = extractor._extraction_tokens_used
+            # if extraction_tokens > 0 and project.user_id:
+            #     from services.credit_service import deduct_tokens
+            #     deduct_tokens(db, project.user_id, extraction_tokens)
+            #     _pipeline_log.info(
+            #         f"[PIPELINE] Deducted {extraction_tokens:,} tokens for user {project.user_id}"
+            #     )
         else:
             _pipeline_log.warning("[PIPELINE] No documents processed -- skipping extraction")
 
@@ -348,6 +357,17 @@ async def _run_pipeline_inner(project_id: uuid.UUID, model_key: str = None, ocr_
         )
         _pipeline_log.info(f"[PIPELINE] Completed for project {project_id}")
 
+    except QuotaExhaustedError as e:
+        _pipeline_log.warning(f"[PIPELINE] Quota exhausted for project {project_id}: {e}")
+        try:
+            project = db.query(Project).filter(Project.project_id == project_id).first()
+            if project:
+                project.processing_status = "failed"
+                project.pipeline_step = None
+                project.error_message = "OUT_OF_CREDITS"
+                db.commit()
+        except Exception:
+            pass
     except Exception as e:
         traceback.print_exc()
         _pipeline_log.error(f"[PIPELINE] FAILED for project {project_id}: {e}")

@@ -37,7 +37,7 @@ class ExtractedParameter(Base):
 
     source_document_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("documents.document_id")
+        ForeignKey("documents.document_id", ondelete="SET NULL")
     )
 
     source_page_number: Mapped[int | None] = mapped_column(Integer)

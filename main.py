@@ -2,8 +2,6 @@
 import asyncio
 import logging
 import os
-import uuid
-
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -13,11 +11,9 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from auth.utils import hash_password
 from core.database import SessionLocal
 from core.clients import validate_clients, get_client_status
 from migrations.initial_schema import create_tables, run_migrations
-from models.user import User
 from models.project import Project
 
 # Import core.logging to attach timing handlers at module load
@@ -136,17 +132,3 @@ def recover_stale_processing():
         db.close()
 
 
-@app.on_event("startup")
-def seed_default_user():
-    """Create default user abc@sooru.ai on startup if it doesn't exist."""
-    db = SessionLocal()
-    try:
-        existing = db.query(User).filter(User.email == "abc@sooru.ai").first()
-        if not existing:
-            user = User(user_id=uuid.uuid4(), email="abc@sooru.ai", password_hash=hash_password("12345678"))
-            db.add(user)
-            db.commit()
-    except Exception:
-        db.rollback()
-    finally:
-        db.close()

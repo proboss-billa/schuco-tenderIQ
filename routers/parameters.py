@@ -5,19 +5,25 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Query
 from sqlalchemy.orm import Session
 
+from auth.utils import get_current_user
 from config.parameters import FACADE_PARAMETERS
 from config.models import list_models, AVAILABLE_MODELS, DEFAULT_MODEL
 from core.database import get_db
 from models.document import Document
 from models.extracted_parameter import ExtractedParameter
 from models.project import Project
+from models.user import User
 from services.extraction import _run_extraction, _run_single_extraction
 
 router = APIRouter(prefix="", tags=["parameters"])
 
 
 @router.get("/projects/{project_id}/parameters")
-async def get_extracted_parameters(project_id: uuid.UUID, db: Session = Depends(get_db)):
+async def get_extracted_parameters(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     project = db.query(Project).filter(Project.project_id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -98,6 +104,8 @@ async def get_extracted_parameters(project_id: uuid.UUID, db: Session = Depends(
             "processing_error": getattr(d, 'processing_error', None),
             "page_count": getattr(d, 'page_count', None),
             "num_chunks": d.num_chunks,
+            "is_archived": getattr(d, "is_archived", False),
+            "archived_at": getattr(d, "archived_at", None).isoformat() if getattr(d, "archived_at", None) else None,
         }
         for d in docs
     ]
@@ -118,6 +126,7 @@ async def get_extracted_parameters(project_id: uuid.UUID, db: Session = Depends(
 async def re_extract_parameters(
     project_id: uuid.UUID,
     background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     model: Optional[str] = Query(None, description="Model key: claude-opus-4, claude-sonnet-4, claude-haiku-3.5, gemini-flash"),
 ):
@@ -151,6 +160,7 @@ async def re_extract_single_parameter(
     project_id: uuid.UUID,
     param_name: str,
     background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Re-run extraction for a single parameter. Uses vectors already in Pinecone."""

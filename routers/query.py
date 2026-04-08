@@ -4,11 +4,14 @@ from typing import Optional
 from fastapi import APIRouter, Form, HTTPException, Depends
 from sqlalchemy.orm import Session
 
+from auth.utils import get_current_user
 from config.models import AVAILABLE_MODELS
 from core.database import get_db
 from models.project import Project
 from models.query_log import QueryLog
+from models.user import User
 from services.query_service import process_query
+# from services.credit_service import check_credits, deduct_tokens  # custom token tracking (parked)
 
 router = APIRouter(prefix="", tags=["query"])
 
@@ -18,6 +21,7 @@ async def adhoc_query(
     project_id: uuid.UUID,
     query: str = Form(...),
     model: Optional[str] = Form(None),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     # Verify project exists
@@ -25,12 +29,23 @@ async def adhoc_query(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
+    # check_credits(current_user)  # custom token tracking (parked)
+
     model_key = model if model and model in AVAILABLE_MODELS else None
-    return process_query(project_id, query, db, model_key=model_key)
+    result = process_query(project_id, query, db, model_key=model_key)
+
+    # if result.get("tokens_used", 0) > 0:  # custom token tracking (parked)
+    #     deduct_tokens(db, current_user.user_id, result["tokens_used"])
+
+    return result
 
 
 @router.get("/projects/{project_id}/chat-history")
-async def get_chat_history(project_id: uuid.UUID, db: Session = Depends(get_db)):
+async def get_chat_history(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Return all chat messages for a project, ordered chronologically."""
     logs = (
         db.query(QueryLog)

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import String, Text, TIMESTAMP, func
+from sqlalchemy import Boolean, String, Text, TIMESTAMP, ForeignKey, func
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 import uuid
 
 from models.base import Base
@@ -71,3 +71,15 @@ class Project(Base):
         Text,
         nullable=True
     )
+
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.user_id"),
+        nullable=True,
+        index=True,
+    )
+
+    is_starred: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    is_archived: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+
+    user = relationship("User", backref="projects")

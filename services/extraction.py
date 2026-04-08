@@ -28,10 +28,11 @@ async def _run_extraction(pid: uuid.UUID, model_key: str = None):
             _proj.error_message = None  # clear previous errors
             _db.commit()
 
-        # Count already-processed docs so top_k / max_sources scale correctly
+        # Count already-processed (non-archived) docs so top_k / max_sources scale correctly
         doc_count = _db.query(Document).filter(
             Document.project_id == pid,
             Document.processed == True,
+            Document.is_archived == False,
         ).count()
 
         # Filter parameters by project type
