@@ -6,7 +6,6 @@
   <component name="ChangeListManager">
     <list default="true" id="65f78ced-6437-4443-b0cd-c25f85f70526" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/extraction/parameter_extractor.py" beforeDir="false" afterPath="$PROJECT_DIR$/extraction/parameter_extractor.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />

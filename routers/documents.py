@@ -246,8 +246,7 @@ def archive_documents(
     affected_params = (
         db.query(ExtractedParameter)
         .filter(
-            ExtractedParameter.project_id == project_id,
-            ExtractedParameter.source_document_id.in_(doc_ids),
+            ExtractedParameter.project_id == project_id
         )
         .all()
     )
