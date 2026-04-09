@@ -93,7 +93,7 @@ app.include_router(timings_router)
 @app.on_event("startup")
 def on_startup():
     create_tables()
-    run_migrations()
+    # run_migrations()
 
     # Log any client initialization failures (non-fatal — app still starts)
     errors = validate_clients()
