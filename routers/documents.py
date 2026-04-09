@@ -269,10 +269,16 @@ def archive_documents(
             # Tier 1: Re-point to next available source (no deletion needed)
             new_primary = remaining[0]
             new_doc_id = new_primary.get("document_id")
-            param.source_document_id = uuid.UUID(new_doc_id) if new_doc_id else None
-            param.source_page_number = new_primary.get("pages", [None])[0]
-            param.source_pages = json.dumps(new_primary.get("pages", []))
+            try:
+                param.source_document_id = uuid.UUID(new_doc_id) if new_doc_id else None
+            except (ValueError, AttributeError):
+                param.source_document_id = None
+            pages = new_primary.get("pages") or []
+            param.source_page_number = pages[0] if pages else None
+            param.source_pages = json.dumps(pages)
             param.source_section = (new_primary.get("sections") or [None])[0]
+            param.source_subsection = None
+            param.source_chunk_id = None
             param.all_sources = json.dumps(remaining)
             repointed_count += 1
         else:
