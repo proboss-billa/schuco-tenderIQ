@@ -548,7 +548,7 @@ def list_project_documents(
             "num_chunks": getattr(d, "num_chunks", None),
             "processing_status": d.processing_status,
             "is_archived": getattr(d, "is_archived", False),
-            "archived_at": getattr(d, "archived_at", None).isoformat() if getattr(d, "archived_at", None) else None,
+            "archived_at": (getattr(d, "archived_at", None).isoformat() + "Z") if getattr(d, "archived_at", None) else None,
         }
         for d in documents
     ]

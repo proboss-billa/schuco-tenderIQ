@@ -221,7 +221,7 @@ def archive_documents(
 
     doc_ids = [d.document_id for d in docs]
     doc_id_strs = [str(d) for d in doc_ids]
-    now = _dt.now()
+    now = _dt.utcnow()
 
     # Remove vectors from Pinecone so they don't appear in search
     pinecone_ids = [
@@ -239,9 +239,11 @@ def archive_documents(
         except Exception as e:
             logger.warning(f"[ARCHIVE-DOCS] Pinecone cleanup failed: {e}")
 
-    # Clear ALL extracted parameters — re-extraction will rebuild from remaining active docs
+    # Delete only parameters sourced from the archived documents
+    # (keeps params from other active docs visible immediately; re-extraction rebuilds the rest)
     db.query(ExtractedParameter).filter(
         ExtractedParameter.project_id == project_id,
+        ExtractedParameter.source_document_id.in_(doc_ids),
     ).delete(synchronize_session="fetch")
 
     for doc in docs:
