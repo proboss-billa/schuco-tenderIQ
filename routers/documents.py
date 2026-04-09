@@ -368,43 +368,38 @@ def delete_documents(
         except Exception as e:
             logger.warning(f"[DELETE-DOCS] Pinecone cleanup failed (non-fatal): {e}")
 
-    # ── Step 2: Delete extracted parameters referencing these docs ───────────
-    # Must happen before chunk deletion (FK: extracted_parameters.source_chunk_id)
-    db.query(ExtractedParameter).filter(
-        ExtractedParameter.project_id == project_id,
-        ExtractedParameter.source_document_id.in_(doc_ids),
-    ).delete(synchronize_session="fetch")
+    # ── Step 2: Delete via raw SQL in FK-safe order ─────────────────────────
+    # Bypass ORM cascade to avoid SET NULL on NOT NULL columns
+    from sqlalchemy import text
 
-    # Also clean all_sources JSON on remaining parameters
-    for param in db.query(ExtractedParameter).filter(ExtractedParameter.project_id == project_id).all():
-        if param.all_sources:
-            try:
-                sources = json.loads(param.all_sources)
-                cleaned = [s for s in sources if s.get("document_id") not in doc_id_strs]
-                param.all_sources = json.dumps(cleaned) if cleaned else None
-            except (json.JSONDecodeError, TypeError):
-                pass
-    db.flush()
-
-    # ── Step 3: Delete chunks explicitly, then document records ─────────────
-    # Flush param deletes first so chunk FKs are cleared
-    chunk_ids = [c.chunk_id for c in
-        db.query(DocumentChunk.chunk_id).filter(DocumentChunk.document_id.in_(doc_ids)).all()]
-    # Nullify any remaining source_chunk_id references
-    if chunk_ids:
-        db.query(ExtractedParameter).filter(
-            ExtractedParameter.source_chunk_id.in_(chunk_ids),
-        ).update({ExtractedParameter.source_chunk_id: None}, synchronize_session="fetch")
-    db.query(DocumentChunk).filter(DocumentChunk.document_id.in_(doc_ids)).delete(
-        synchronize_session="fetch"
-    )
-    # Expunge docs from session to prevent ORM cascade SET NULL on chunks
+    # Expunge docs from session first to prevent ORM interference
     for doc in docs:
         db.expunge(doc)
-    # Delete via raw SQL to bypass ORM relationship cascade
-    from sqlalchemy import text
+
     for did in doc_ids:
-        db.execute(text("DELETE FROM documents WHERE document_id = :did"), {"did": did})
+        did_str = str(did)
+        # Delete extracted_parameters referencing chunks from this document
+        db.execute(text(
+            "DELETE FROM extracted_parameters WHERE source_chunk_id IN "
+            "(SELECT chunk_id FROM document_chunks WHERE document_id = :did)"
+        ), {"did": did_str})
+        # Nullify source_chunk_id on remaining params that reference these chunks
+        db.execute(text(
+            "UPDATE extracted_parameters SET source_chunk_id = NULL WHERE source_chunk_id IN "
+            "(SELECT chunk_id FROM document_chunks WHERE document_id = :did)"
+        ), {"did": did_str})
+        # Delete params by source_document_id
+        db.execute(text(
+            "DELETE FROM extracted_parameters WHERE source_document_id = :did"
+        ), {"did": did_str})
+        # Delete chunks
+        db.execute(text(
+            "DELETE FROM document_chunks WHERE document_id = :did"
+        ), {"did": did_str})
+        # Delete document
+        db.execute(text(
+            "DELETE FROM documents WHERE document_id = :did"
+        ), {"did": did_str})
     db.commit()
 
     # ── Step 4: Delete physical files ──────────────────────────────────────
