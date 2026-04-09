@@ -160,7 +160,7 @@ class ParameterExtractor:
             response = self.anthropic.messages.create(
                 model=self.model_id,
                 max_tokens=max_tokens,
-                temperature=0.05,
+                temperature=0.0,
                 system=system,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -174,7 +174,7 @@ class ParameterExtractor:
                     model=self.model_id,
                     contents=prompt,
                     config=genai.types.GenerateContentConfig(
-                        temperature=0.05,
+                        temperature=0.0,
                         max_output_tokens=max_tokens,
                         system_instruction=system,
                     ),
@@ -196,7 +196,7 @@ class ParameterExtractor:
             response = self.openai.chat.completions.create(
                 model=self.model_id,
                 max_tokens=max_tokens,
-                temperature=0.05,
+                temperature=0.0,
                 messages=[
                     {"role": "system", "content": system},
                     {"role": "user", "content": prompt},
@@ -219,6 +219,7 @@ class ParameterExtractor:
             session.query(DocumentChunk)
             .options(joinedload(DocumentChunk.document))
             .filter(DocumentChunk.pinecone_id.in_(chunk_ids))
+            .order_by(DocumentChunk.chunk_id)
             .all()
         )
         if not child_chunks:
@@ -231,6 +232,7 @@ class ParameterExtractor:
                 session.query(DocumentChunk)
                 .options(joinedload(DocumentChunk.document))
                 .filter(DocumentChunk.chunk_id.in_(parent_ids))
+                .order_by(DocumentChunk.chunk_id)
                 .all()
             )
             parent_map = {p.chunk_id: p for p in parent_rows}

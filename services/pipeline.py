@@ -32,7 +32,7 @@ async def _wait_for_pinecone_doc(project_id: str, document_id: str, timeout: int
     """
     dummy_vec = [0.0] * 1536
     elapsed = 0
-    poll_interval = 3
+    poll_interval = 2
     while elapsed < timeout:
         await asyncio.sleep(poll_interval)
         elapsed += poll_interval
@@ -129,7 +129,7 @@ async def _run_pipeline_inner(project_id: uuid.UUID, model_key: str = None, ocr_
                 # Fire Pinecone wait so BOQ vectors are ready for extraction
                 boq_pinecone_tasks.append(
                     asyncio.create_task(
-                        _wait_for_pinecone_doc(str(project_id), str(doc.document_id), timeout=120)
+                        _wait_for_pinecone_doc(str(project_id), str(doc.document_id), timeout=180)
                     )
                 )
             except Exception as e:
@@ -192,7 +192,7 @@ async def _run_pipeline_inner(project_id: uuid.UUID, model_key: str = None, ocr_
                     )
 
                     wait_task = asyncio.create_task(
-                        _wait_for_pinecone_doc(str(project_id), str(doc_id), timeout=180)
+                        _wait_for_pinecone_doc(str(project_id), str(doc_id), timeout=240)
                     )
                     return (doc, True, wait_task)
 
