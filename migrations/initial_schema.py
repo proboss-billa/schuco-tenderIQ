@@ -114,3 +114,66 @@ def run_migrations():
             "CREATE INDEX IF NOT EXISTS idx_extraction_runs_project "
             "ON extraction_runs(project_id)"
         )
+
+        # ── 0005: Auth, upload, deletion columns ────────────────────────────
+        _run_migration(conn, "users name",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS name VARCHAR(255)"
+        )
+        _run_migration(conn, "users phone",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(50)"
+        )
+        _run_migration(conn, "projects user_id",
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(user_id)"
+        )
+        _run_migration(conn, "projects user_id index",
+            "CREATE INDEX IF NOT EXISTS idx_projects_user_id ON projects(user_id)"
+        )
+
+        # ── 0006: Starred / archived on projects ────────────────────────────
+        _run_migration(conn, "projects is_starred",
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS is_starred BOOLEAN DEFAULT false"
+        )
+        _run_migration(conn, "projects is_archived",
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS is_archived BOOLEAN DEFAULT false"
+        )
+
+        # ── 0007: User avatar ────────────────────────────────────────────────
+        _run_migration(conn, "users avatar_path",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_path VARCHAR(500)"
+        )
+
+        # ── 0008: Email OTP table ────────────────────────────────────────────
+        _run_migration(conn, "email_otps table", """
+            CREATE TABLE IF NOT EXISTS email_otps (
+                id UUID PRIMARY KEY,
+                email VARCHAR(255) NOT NULL,
+                otp_code VARCHAR(6) NOT NULL,
+                purpose VARCHAR(20) NOT NULL DEFAULT 'signup',
+                signup_payload TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                is_used BOOLEAN NOT NULL DEFAULT false,
+                created_at TIMESTAMP DEFAULT now(),
+                expires_at TIMESTAMP NOT NULL
+            )
+        """)
+        _run_migration(conn, "email_otps email index",
+            "CREATE INDEX IF NOT EXISTS idx_email_otps_email ON email_otps(email)"
+        )
+
+        # ── 0009: User token credits ─────────────────────────────────────────
+        _run_migration(conn, "users token_limit",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS token_limit BIGINT NOT NULL DEFAULT 1000000"
+        )
+        _run_migration(conn, "users tokens_used",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS tokens_used BIGINT NOT NULL DEFAULT 0"
+        )
+
+        # ── 0010: Document is_archived ───────────────────────────────────────
+        _run_migration(conn, "documents is_archived",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS is_archived BOOLEAN DEFAULT false"
+        )
+
+        # ── 0011: Document archived_at ───────────────────────────────────────
+        _run_migration(conn, "documents archived_at",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP"
+        )
