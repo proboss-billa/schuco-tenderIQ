@@ -289,6 +289,12 @@ def archive_documents(
     for doc in docs:
         doc.is_archived = True
         doc.archived_at = now
+
+    # Delete associated document chunks
+    db.query(DocumentChunk).filter(
+        DocumentChunk.document_id.in_(doc_ids)
+    ).delete(synchronize_session="fetch")
+
     db.commit()
 
     logger.info(
