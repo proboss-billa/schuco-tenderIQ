@@ -360,7 +360,7 @@ class ParameterExtractor:
             doc_groups[doc_id].append(chunk)
 
         interleaved = []
-        group_lists = list(doc_groups.values())
+        group_lists = [doc_groups[k] for k in sorted(doc_groups.keys())]
         max_len = max(len(g) for g in group_lists) if group_lists else 0
 
         for i in range(max_len):
@@ -1331,7 +1331,7 @@ documents" if truly absent."""
         )
 
         # ═══════════ PASS 2: Full-context fallback for not-found params ═══════════
-        not_found_names = {r['parameter_name'] for r in all_results if not r.get('found')}
+        not_found_names = sorted({r['parameter_name'] for r in all_results if not r.get('found')})
         missing_params = [p for p in facade_parameters if p['name'] in not_found_names]
 
         if missing_params:
