@@ -8,7 +8,7 @@ import resend
 logger = logging.getLogger("tenderiq.email")
 
 resend.api_key = os.getenv("RESEND_API_KEY")
-EMAIL_FROM = os.getenv("EMAIL_FROM", "TenderIQ <onboarding@resend.dev>")
+EMAIL_FROM = os.getenv("EMAIL_FROM", "TenderIQ <info@sooru.ai>")
 EMAIL_DEV_MODE = os.getenv("EMAIL_DEV_MODE", "true").lower() == "true"
 
 
