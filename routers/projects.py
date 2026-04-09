@@ -8,6 +8,7 @@ from typing import List, Optional
 import aiofiles
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends, BackgroundTasks, Query
 from fastapi.responses import FileResponse
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from auth.utils import get_current_user
@@ -432,8 +433,17 @@ def delete_project(
         except Exception as e:
             logger.warning(f"[DELETE] Pinecone cleanup failed (non-fatal): {e}")
 
-    # ── Step 2: Delete project from PostgreSQL (CASCADE cleans related rows) ─
-    db.delete(project)
+    # ── Step 2: Delete project from PostgreSQL ────────────────────────────────
+    # Use raw SQL to avoid ORM cascade trying SET NULL on documents.project_id
+    # (which is NOT NULL). Delete in FK-safe order.
+    db.expunge(project)
+    pid_str = str(project_id)
+    db.execute(text("DELETE FROM extracted_parameters WHERE project_id = :pid"), {"pid": pid_str})
+    db.execute(text("DELETE FROM extraction_runs WHERE project_id = :pid"), {"pid": pid_str})
+    db.execute(text("DELETE FROM query_log WHERE project_id = :pid"), {"pid": pid_str})
+    db.execute(text("DELETE FROM document_chunks WHERE project_id = :pid"), {"pid": pid_str})
+    db.execute(text("DELETE FROM documents WHERE project_id = :pid"), {"pid": pid_str})
+    db.execute(text("DELETE FROM projects WHERE project_id = :pid"), {"pid": pid_str})
     db.commit()
     logger.info(f"[DELETE] Removed project '{project_name}' from database")
 
