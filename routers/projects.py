@@ -481,15 +481,19 @@ _MIME_TYPES = {
 def serve_document_file(
     project_id: uuid.UUID,
     document_id: uuid.UUID,
-    current_user: User = Depends(get_current_user),
+    token: str = None,
     db: Session = Depends(get_db),
 ):
     """Serve an uploaded document file for preview.
 
+    Accepts auth via ?token= query param (for new-tab opens).
     Returns the raw file with correct Content-Type so browsers can render
-    PDFs inline, open spreadsheets, etc.  Used by the frontend to open
-    source documents when a user clicks a parameter's source reference.
+    PDFs inline, open spreadsheets, etc.
     """
+    from auth.utils import decode_token as _decode
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    _decode(token)  # raises 401 if invalid
     document = (
         db.query(Document)
         .filter(
