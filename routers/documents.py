@@ -239,41 +239,72 @@ def archive_documents(
         except Exception as e:
             logger.warning(f"[ARCHIVE-DOCS] Pinecone cleanup failed: {e}")
 
-    # Collect param names sourced from the archived docs (for targeted re-extraction)
-    deleted_params = (
-        db.query(ExtractedParameter.parameter_name)
+    # ── 3-tier smart param handling ──
+    # Instead of deleting all params + full re-extract, check if each param
+    # has alternate sources in non-archived docs and re-point when possible.
+    archived_id_strs = {str(d) for d in doc_ids}
+    affected_params = (
+        db.query(ExtractedParameter)
         .filter(
             ExtractedParameter.project_id == project_id,
             ExtractedParameter.source_document_id.in_(doc_ids),
         )
         .all()
     )
-    deleted_param_names = [p[0] for p in deleted_params]
 
-    # Delete only parameters sourced from the archived documents
-    db.query(ExtractedParameter).filter(
-        ExtractedParameter.project_id == project_id,
-        ExtractedParameter.source_document_id.in_(doc_ids),
-    ).delete(synchronize_session="fetch")
+    exclusive_param_names = []
+    repointed_count = 0
+
+    for param in affected_params:
+        # Parse all_sources JSON to find alternate docs
+        try:
+            sources = json.loads(param.all_sources) if param.all_sources else []
+        except (ValueError, TypeError):
+            sources = []
+
+        # Remove archived doc(s) from sources list
+        remaining = [s for s in sources if s.get("document_id") not in archived_id_strs]
+
+        if remaining:
+            # Tier 1: Re-point to next available source (no deletion needed)
+            new_primary = remaining[0]
+            new_doc_id = new_primary.get("document_id")
+            param.source_document_id = uuid.UUID(new_doc_id) if new_doc_id else None
+            param.source_page_number = new_primary.get("pages", [None])[0]
+            param.source_pages = json.dumps(new_primary.get("pages", []))
+            param.source_section = (new_primary.get("sections") or [None])[0]
+            param.all_sources = json.dumps(remaining)
+            repointed_count += 1
+        else:
+            # Tier 2: Exclusive to archived doc — delete
+            exclusive_param_names.append(param.parameter_name)
+            db.delete(param)
 
     for doc in docs:
         doc.is_archived = True
         doc.archived_at = now
     db.commit()
 
-    # Only re-extract the specific params that were deleted — not all params.
-    # This prevents count inflation (e.g. 82 → 86) when fewer docs produce
-    # "cleaner" context that finds previously-missing params.
+    logger.info(
+        f"[ARCHIVE-DOCS] {repointed_count} params re-pointed to other docs, "
+        f"{len(exclusive_param_names)} exclusive params deleted"
+    )
+
+    # Tier 3: Re-extract only params exclusive to the archived doc
     active_count = db.query(Document).filter(
         Document.project_id == project_id,
         Document.is_archived == False,
         Document.processed == True,
     ).count()
-    if active_count > 0 and deleted_param_names:
+    if active_count > 0 and exclusive_param_names:
         from services.extraction import _run_targeted_extraction
-        background_tasks.add_task(_run_targeted_extraction, project_id, deleted_param_names)
+        background_tasks.add_task(_run_targeted_extraction, project_id, exclusive_param_names)
 
-    logger.info(f"[ARCHIVE-DOCS] Archived {len(docs)} doc(s), re-extracting {len(deleted_param_names)} params with {active_count} remaining docs")
+    logger.info(
+        f"[ARCHIVE-DOCS] Archived {len(docs)} doc(s): "
+        f"{repointed_count} re-pointed, {len(exclusive_param_names)} exclusive→re-extract, "
+        f"{active_count} active docs remaining"
+    )
     return {"archived_count": len(docs), "remaining_active": active_count}
 
 
