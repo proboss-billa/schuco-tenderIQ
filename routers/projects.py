@@ -521,6 +521,39 @@ def serve_document_file(
     )
 
 
+@router.get("/docs/{document_id}/{filename}")
+def serve_document_clean_url(
+    document_id: uuid.UUID,
+    filename: str,
+    token: str = None,
+    page: int = None,
+    db: Session = Depends(get_db),
+):
+    """Serve document file via clean URL: /docs/{id}/{name}?token=...&page=N"""
+    from auth.utils import decode_token as _decode
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    _decode(token)
+
+    document = db.query(Document).filter(Document.document_id == document_id).first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    file_path = Path(document.file_path)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found on disk")
+
+    ext = file_path.suffix.lower()
+    media_type = _MIME_TYPES.get(ext, "application/octet-stream")
+
+    return FileResponse(
+        path=str(file_path),
+        media_type=media_type,
+        filename=document.original_filename,
+        headers={"Content-Disposition": f'inline; filename="{document.original_filename}"'},
+    )
+
+
 @router.get("/projects/{project_id}/documents")
 def list_project_documents(
     project_id: uuid.UUID,
