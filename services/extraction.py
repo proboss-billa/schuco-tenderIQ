@@ -98,6 +98,89 @@ async def _run_extraction(pid: uuid.UUID, model_key: str = None):
         _db.close()
 
 
+async def _run_targeted_extraction(pid: uuid.UUID, param_names: list):
+    """Re-extract only specific parameters (used after archive to re-check
+    deleted params in remaining docs without touching unaffected params)."""
+    _timing_project_id.set(str(pid))
+    _project_timings[str(pid)] = []
+    _pipeline_log.info(f"[TARGETED-EXTRACT] Starting for project {pid}, {len(param_names)} params")
+    _db = SessionLocal()
+    try:
+        _proj = _db.query(Project).filter(Project.project_id == pid).first()
+        if _proj:
+            _proj.processing_status = "processing"
+            _proj.pipeline_step = f"Re-extracting {len(param_names)} parameters from remaining documents..."
+            _proj.error_message = None
+            _db.commit()
+
+        doc_count = _db.query(Document).filter(
+            Document.project_id == pid,
+            Document.processed == True,
+            Document.is_archived == False,
+        ).count()
+
+        # Filter FACADE_PARAMETERS to only the deleted param names
+        p_type = _proj.project_type if _proj else "commercial"
+        targeted_params = [
+            p for p in FACADE_PARAMETERS
+            if p['name'] in param_names
+            and p.get("project_type", "both") in ("both", p_type)
+        ]
+        _pipeline_log.info(f"[TARGETED-EXTRACT] {len(targeted_params)} params matched from config")
+
+        if targeted_params:
+            extractor = ParameterExtractor(
+                pinecone_index=pinecone_index,
+                embedding_client=embedding_client,
+                db_session=_db,
+                session_factory=SessionLocal,
+            )
+            extractions = await extractor.extract_all_parameters_async(
+                str(pid),
+                facade_parameters=targeted_params,
+                max_concurrent=10,
+                num_docs=max(1, doc_count),
+            )
+            found_count = len([e for e in extractions if e.get("found")])
+            _pipeline_log.info(f"[TARGETED-EXTRACT] Done -- {found_count}/{len(extractions)} re-found in remaining docs")
+
+        # Clean up any params still sourced from archived docs
+        archived_doc_ids = [
+            d.document_id for d in
+            _db.query(Document).filter(
+                Document.project_id == pid,
+                Document.is_archived == True,
+            ).all()
+        ]
+        if archived_doc_ids:
+            orphan_count = _db.query(ExtractedParameter).filter(
+                ExtractedParameter.project_id == pid,
+                ExtractedParameter.source_document_id.in_(archived_doc_ids),
+            ).delete(synchronize_session="fetch")
+            _db.commit()
+            if orphan_count:
+                _pipeline_log.info(f"[TARGETED-EXTRACT] Cleaned {orphan_count} orphaned param(s)")
+
+        _proj = _db.query(Project).filter(Project.project_id == pid).first()
+        if _proj:
+            _proj.processing_status = "completed"
+            _proj.pipeline_step = None
+            _db.commit()
+    except Exception as e:
+        _tb.print_exc()
+        _pipeline_log.error(f"[TARGETED-EXTRACT] FAILED for project {pid}: {e}")
+        try:
+            _proj = _db.query(Project).filter(Project.project_id == pid).first()
+            if _proj:
+                _proj.processing_status = "failed"
+                _proj.pipeline_step = None
+                _db.commit()
+        except Exception:
+            pass
+    finally:
+        _db.close()
+
+
 async def _run_single_extraction(pid: uuid.UUID, p_config: dict):
     _timing_project_id.set(str(pid))
     _db = SessionLocal()

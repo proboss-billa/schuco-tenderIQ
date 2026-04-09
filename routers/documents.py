@@ -239,6 +239,17 @@ def archive_documents(
         except Exception as e:
             logger.warning(f"[ARCHIVE-DOCS] Pinecone cleanup failed: {e}")
 
+    # Collect param names sourced from the archived docs (for targeted re-extraction)
+    deleted_params = (
+        db.query(ExtractedParameter.parameter_name)
+        .filter(
+            ExtractedParameter.project_id == project_id,
+            ExtractedParameter.source_document_id.in_(doc_ids),
+        )
+        .all()
+    )
+    deleted_param_names = [p[0] for p in deleted_params]
+
     # Delete only parameters sourced from the archived documents
     db.query(ExtractedParameter).filter(
         ExtractedParameter.project_id == project_id,
@@ -250,17 +261,19 @@ def archive_documents(
         doc.archived_at = now
     db.commit()
 
-    # Check if there are remaining active docs — if so, re-extract params
+    # Only re-extract the specific params that were deleted — not all params.
+    # This prevents count inflation (e.g. 82 → 86) when fewer docs produce
+    # "cleaner" context that finds previously-missing params.
     active_count = db.query(Document).filter(
         Document.project_id == project_id,
         Document.is_archived == False,
         Document.processed == True,
     ).count()
-    if active_count > 0:
-        from services.extraction import _run_extraction
-        background_tasks.add_task(_run_extraction, project_id)
+    if active_count > 0 and deleted_param_names:
+        from services.extraction import _run_targeted_extraction
+        background_tasks.add_task(_run_targeted_extraction, project_id, deleted_param_names)
 
-    logger.info(f"[ARCHIVE-DOCS] Archived {len(docs)} doc(s), re-extracting with {active_count} remaining")
+    logger.info(f"[ARCHIVE-DOCS] Archived {len(docs)} doc(s), re-extracting {len(deleted_param_names)} params with {active_count} remaining docs")
     return {"archived_count": len(docs), "remaining_active": active_count}
 
 
