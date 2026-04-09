@@ -26,9 +26,9 @@ router = APIRouter(prefix="", tags=["auth"])
 
 class SignupRequest(BaseModel):
     email: str
-    password: str = Field(min_length=6)
-    name: str | None = None
-    phone: str | None = None
+    password: str = Field(min_length=8)
+    name: str = Field(min_length=1)
+    phone: str = Field(min_length=1)
 
 
 class LoginRequest(BaseModel):
@@ -43,7 +43,7 @@ class ProfileUpdateRequest(BaseModel):
 
 class PasswordChangeRequest(BaseModel):
     current_password: str
-    new_password: str = Field(min_length=6)
+    new_password: str = Field(min_length=8)
 
 
 class VerifyOtpRequest(BaseModel):
@@ -63,7 +63,7 @@ class ForgotPasswordRequest(BaseModel):
 class ResetPasswordRequest(BaseModel):
     email: str
     otp: str = Field(min_length=4, max_length=6)
-    new_password: str = Field(min_length=6)
+    new_password: str = Field(min_length=8)
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
