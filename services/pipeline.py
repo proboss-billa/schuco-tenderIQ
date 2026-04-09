@@ -118,7 +118,8 @@ async def _run_pipeline_inner(project_id: uuid.UUID, model_key: str = None, ocr_
             t_boq = _time.perf_counter()
             try:
                 processor._process_boq_document(doc)
-                doc.processing_status = "completed"
+                doc.processing_status = "indexed"
+                indexed_docs.append(doc)
                 _pipeline_log.info(
                     f"[TIMING][PIPELINE] BOQ {doc.original_filename}: "
                     f"{_time.perf_counter() - t_boq:.2f}s"
