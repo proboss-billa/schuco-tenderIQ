@@ -3,7 +3,7 @@ import uuid
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from auth.utils import get_current_user
 from config.parameters import FACADE_PARAMETERS
@@ -27,10 +27,18 @@ async def get_extracted_parameters(
     project = db.query(Project).filter(Project.project_id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    if project.user_id is not None and project.user_id != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
 
-    parameters = db.query(ExtractedParameter).filter(
-        ExtractedParameter.project_id == project_id
-    ).all()
+    parameters = (
+        db.query(ExtractedParameter)
+        .options(
+            joinedload(ExtractedParameter.source_document),
+            joinedload(ExtractedParameter.source_chunk),
+        )
+        .filter(ExtractedParameter.project_id == project_id)
+        .all()
+    )
 
     results = []
     for param in parameters:
@@ -135,6 +143,8 @@ async def re_extract_parameters(
     project = db.query(Project).filter(Project.project_id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    if project.user_id is not None and project.user_id != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
 
     # Idempotency guard: prevent concurrent re-extractions
     if project.processing_status == "processing":
@@ -167,6 +177,8 @@ async def re_extract_single_parameter(
     project = db.query(Project).filter(Project.project_id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    if project.user_id is not None and project.user_id != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
 
     # Find the parameter config by name
     param_config = next((p for p in FACADE_PARAMETERS if p['name'] == param_name), None)

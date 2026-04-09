@@ -505,7 +505,10 @@ def serve_document_file(
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    file_path = Path(document.file_path)
+    file_path = Path(document.file_path).resolve()
+    uploads_dir = Path("uploads").resolve()
+    if not file_path.is_relative_to(uploads_dir):
+        raise HTTPException(status_code=403, detail="Invalid file path")
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found on disk")
 
@@ -539,7 +542,10 @@ def serve_document_clean_url(
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    file_path = Path(document.file_path)
+    file_path = Path(document.file_path).resolve()
+    uploads_dir = Path("uploads").resolve()
+    if not file_path.is_relative_to(uploads_dir):
+        raise HTTPException(status_code=403, detail="Invalid file path")
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found on disk")
 
@@ -564,6 +570,8 @@ def list_project_documents(
     project = db.query(Project).filter(Project.project_id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    if project.user_id is not None and project.user_id != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
 
     documents = (
         db.query(Document)

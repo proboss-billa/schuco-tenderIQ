@@ -22,6 +22,8 @@ async def get_project_timings(
     project = db.query(Project).filter(Project.project_id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    if project.user_id is not None and project.user_id != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
 
     entries = _project_timings.get(str(project_id), [])
     summary = [e for e in entries if e["summary"]]

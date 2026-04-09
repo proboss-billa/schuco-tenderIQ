@@ -9,6 +9,7 @@ from core.logging import _timing_project_id, _project_timings, _pipeline_log
 from extraction.parameter_extractor import ParameterExtractor, _get_llm_semaphore
 from models.document import Document
 from models.document_chunk import DocumentChunk
+from models.extracted_parameter import ExtractedParameter
 from models.project import Project
 from processing.document_processor import DocumentProcessor
 from services.pipeline import _wait_for_pinecone_doc
@@ -58,6 +59,23 @@ async def _run_extraction(pid: uuid.UUID, model_key: str = None):
         )
         found_count = len([e for e in extractions if e.get("found")])
         _pipeline_log.info(f"[RE-EXTRACT] Done -- {found_count}/{len(extractions)} parameters found")
+
+        # Clean up params still pointing to archived docs (not found in remaining docs)
+        archived_doc_ids = [
+            d.document_id for d in
+            _db.query(Document).filter(
+                Document.project_id == pid,
+                Document.is_archived == True,
+            ).all()
+        ]
+        if archived_doc_ids:
+            orphan_count = _db.query(ExtractedParameter).filter(
+                ExtractedParameter.project_id == pid,
+                ExtractedParameter.source_document_id.in_(archived_doc_ids),
+            ).delete(synchronize_session="fetch")
+            _db.commit()
+            if orphan_count:
+                _pipeline_log.info(f"[RE-EXTRACT] Cleaned {orphan_count} param(s) still sourced from archived docs")
 
         # Mark complete so polling stops
         _proj = _db.query(Project).filter(Project.project_id == pid).first()

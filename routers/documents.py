@@ -240,7 +240,6 @@ def archive_documents(
             logger.warning(f"[ARCHIVE-DOCS] Pinecone cleanup failed: {e}")
 
     # Delete only parameters sourced from the archived documents
-    # (keeps params from other active docs visible immediately; re-extraction rebuilds the rest)
     db.query(ExtractedParameter).filter(
         ExtractedParameter.project_id == project_id,
         ExtractedParameter.source_document_id.in_(doc_ids),

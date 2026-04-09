@@ -24,10 +24,12 @@ async def adhoc_query(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    # Verify project exists
+    # Verify project exists and belongs to current user
     project = db.query(Project).filter(Project.project_id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    if project.user_id is not None and project.user_id != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
 
     # check_credits(current_user)  # custom token tracking (parked)
 
@@ -47,6 +49,12 @@ async def get_chat_history(
     db: Session = Depends(get_db),
 ):
     """Return all chat messages for a project, ordered chronologically."""
+    project = db.query(Project).filter(Project.project_id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project.user_id is not None and project.user_id != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
     logs = (
         db.query(QueryLog)
         .filter(QueryLog.project_id == project_id)

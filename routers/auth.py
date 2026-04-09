@@ -297,16 +297,6 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     }
 
 
-@router.get("/debug/packages")
-def debug_packages():
-    from importlib.metadata import version, packages_distributions
-    return {
-        "mistralai_version": version("mistralai"),
-        "python_path": __import__("sys").path,
-        "mistralai_location": str(packages_distributions().get("mistralai"))
-    }
-
-
 @router.get("/me")
 def get_me(current_user: User = Depends(get_current_user)):
     return {
@@ -314,7 +304,7 @@ def get_me(current_user: User = Depends(get_current_user)):
         "email": current_user.email,
         "name": current_user.name,
         "phone": current_user.phone,
-        "has_avatar": bool(current_user.avatar_path),
+        "has_avatar": bool(current_user.avatar_path) and Path(current_user.avatar_path).exists(),
         "token_limit": current_user.token_limit,
         "tokens_used": current_user.tokens_used,
         "tokens_remaining": max(0, current_user.token_limit - current_user.tokens_used),
@@ -416,4 +406,5 @@ def get_avatar(token: str, db: Session = Depends(get_db)):
     p = Path(user.avatar_path)
     if not p.exists():
         raise HTTPException(status_code=404, detail="No avatar")
-    return FileResponse(p)
+    _AVATAR_MIMES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
+    return FileResponse(p, media_type=_AVATAR_MIMES.get(p.suffix.lower(), "image/jpeg"))

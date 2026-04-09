@@ -323,13 +323,15 @@ class ParameterExtractor:
         """
         from models.document import Document
 
-        # 1. Fetch ALL level-0 parents (specs, drawings, docx, BOQ — all have them now)
+        # 1. Fetch ALL level-0 parents from non-archived docs only
         all_parents = (
             self.db.query(DocumentChunk)
+            .join(Document, DocumentChunk.document_id == Document.document_id)
             .options(joinedload(DocumentChunk.document))
             .filter(
                 DocumentChunk.project_id == project_id,
                 DocumentChunk.chunk_level == 0,
+                Document.is_archived == False,
             )
             .order_by(DocumentChunk.document_id, DocumentChunk.page_number)
             .all()
@@ -340,10 +342,12 @@ class ParameterExtractor:
             logger.warning(f"[FULL_CONTEXT] No level-0 parents found — falling back to level-1 children")
             all_parents = (
                 self.db.query(DocumentChunk)
+                .join(Document, DocumentChunk.document_id == Document.document_id)
                 .options(joinedload(DocumentChunk.document))
                 .filter(
                     DocumentChunk.project_id == project_id,
                     DocumentChunk.chunk_level == 1,
+                    Document.is_archived == False,
                 )
                 .order_by(DocumentChunk.document_id, DocumentChunk.page_number)
                 .all()
