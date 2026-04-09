@@ -49,7 +49,7 @@ async def _run_restore_reembed(project_id: uuid.UUID, doc_ids: List[uuid.UUID]):
             if not doc:
                 continue
 
-            doc.processing_status = "processing"
+            doc.processing_status = "indexed"
             db.commit()
 
             # Get existing level-1 chunks (the ones that go in Pinecone)
@@ -391,6 +391,10 @@ def delete_documents(
         # Delete params by source_document_id
         db.execute(text(
             "DELETE FROM extracted_parameters WHERE source_document_id = :did"
+        ), {"did": did_str})
+        # Delete BOQ items referencing this document
+        db.execute(text(
+            "DELETE FROM boq_items WHERE document_id = :did"
         ), {"did": did_str})
         # Delete chunks
         db.execute(text(

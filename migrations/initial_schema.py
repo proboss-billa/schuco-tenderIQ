@@ -177,3 +177,32 @@ def run_migrations():
         _run_migration(conn, "documents archived_at",
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP"
         )
+
+        # ── 0012: Fix FK constraints for safe document deletion ──────────────
+        _run_migration(conn, "fix source_chunk_id FK",
+            "ALTER TABLE extracted_parameters "
+            "DROP CONSTRAINT IF EXISTS extracted_parameters_source_chunk_id_fkey"
+        )
+        _run_migration(conn, "add source_chunk_id FK SET NULL",
+            "ALTER TABLE extracted_parameters "
+            "ADD CONSTRAINT extracted_parameters_source_chunk_id_fkey "
+            "FOREIGN KEY (source_chunk_id) REFERENCES document_chunks(chunk_id) ON DELETE SET NULL"
+        )
+        _run_migration(conn, "fix source_document_id FK",
+            "ALTER TABLE extracted_parameters "
+            "DROP CONSTRAINT IF EXISTS extracted_parameters_source_document_id_fkey"
+        )
+        _run_migration(conn, "add source_document_id FK SET NULL",
+            "ALTER TABLE extracted_parameters "
+            "ADD CONSTRAINT extracted_parameters_source_document_id_fkey "
+            "FOREIGN KEY (source_document_id) REFERENCES documents(document_id) ON DELETE SET NULL"
+        )
+        _run_migration(conn, "fix boq_items document_id FK",
+            "ALTER TABLE boq_items "
+            "DROP CONSTRAINT IF EXISTS boq_items_document_id_fkey"
+        )
+        _run_migration(conn, "add boq_items document_id FK CASCADE",
+            "ALTER TABLE boq_items "
+            "ADD CONSTRAINT boq_items_document_id_fkey "
+            "FOREIGN KEY (document_id) REFERENCES documents(document_id) ON DELETE CASCADE"
+        )
