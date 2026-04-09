@@ -97,6 +97,7 @@ async def _run_pipeline_inner(project_id: uuid.UUID, model_key: str = None, ocr_
         # Process non-drawing specs first (fast), then heavy drawing PDFs last
         spec_docs.sort(key=lambda d: (1 if d.file_type == 'pdf_drawing' else 0, d.original_filename))
         total_spec = len(spec_docs)
+        total_docs = len(spec_docs) + len(boq_docs)
         _pipeline_log.info(
             f"[PIPELINE] {len(spec_docs)} spec docs, {len(boq_docs)} BOQ docs"
         )
@@ -110,9 +111,10 @@ async def _run_pipeline_inner(project_id: uuid.UUID, model_key: str = None, ocr_
         )
 
         # ── Process BOQ documents (no LLM extraction needed) ─────────────────
+        indexed_docs = []
         boq_pinecone_tasks = []
-        for doc in boq_docs:
-            project.pipeline_step = f"Processing BOQ: {doc.original_filename}"
+        for boq_idx, doc in enumerate(boq_docs, 1):
+            project.pipeline_step = f"Processing documents ({boq_idx}/{total_docs})..."
             doc.processing_status = "processing"
             db.commit()
             t_boq = _time.perf_counter()
@@ -143,7 +145,6 @@ async def _run_pipeline_inner(project_id: uuid.UUID, model_key: str = None, ocr_
         _completed_count = [0]
 
         indexed_spec_count = 0
-        indexed_docs    = []
         pinecone_wait_tasks = []
 
         async def _process_one_spec(doc, idx):
@@ -154,7 +155,7 @@ async def _run_pipeline_inner(project_id: uuid.UUID, model_key: str = None, ocr_
 
                 async with _progress_lock:
                     project.pipeline_step = (
-                        f"Processing documents ({idx}/{total_spec})..."
+                        f"Processing documents ({len(boq_docs) + idx}/{total_docs})..."
                     )
                     db.commit()
 
