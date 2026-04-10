@@ -299,6 +299,7 @@ def process_query(project_id: uuid.UUID, query: str, db: Session, model_key: str
 
     sources = [
         {
+            "document_id": str(chunk.document_id),
             "document": chunk.document.original_filename,
             "page": chunk.page_number,
             "section": chunk.section_title,

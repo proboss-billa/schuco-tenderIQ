@@ -259,23 +259,17 @@ async def upload_additional_files(
             detail="Project is currently processing. Wait for completion before uploading.",
         )
 
-    # Duplicate detection: check filenames already in this project
-    existing_docs = (
-        db.query(Document.original_filename, Document.is_archived)
+    # Duplicate detection: any file already in this project (active or
+    # historically archived) is treated as a generic duplicate now that the
+    # archive feature is parked.
+    existing_names = {
+        d.original_filename for d in
+        db.query(Document.original_filename)
         .filter(Document.project_id == project.project_id)
         .all()
-    )
-    existing_map = {d.original_filename: d.is_archived for d in existing_docs}
-    dupes = [f.filename for f in files if f.filename in existing_map]
+    }
+    dupes = [f.filename for f in files if f.filename in existing_names]
     if dupes:
-        archived_dupes = [f for f in dupes if existing_map.get(f)]
-        active_dupes = [f for f in dupes if not existing_map.get(f)]
-        if archived_dupes and not active_dupes:
-            names = ", ".join(archived_dupes)
-            raise HTTPException(
-                status_code=409,
-                detail=f"ARCHIVED:{names}",
-            )
         names = ", ".join(dupes)
         raise HTTPException(
             status_code=409,

@@ -70,21 +70,11 @@ async def get_chat_history(
             "timestamp": log.created_at.isoformat() if log.created_at else None,
         })
         if log.response_text:
-            # Build source strings for display
-            source_strs = []
-            if log.sources_json:
-                for s in log.sources_json:
-                    label = s.get("document", "")
-                    if s.get("page"):
-                        label += f" \u00b7 Page {s['page']}"
-                    if s.get("section"):
-                        label += f" \u00b7 {s['section']}"
-                    source_strs.append(label)
             messages.append({
                 "role": "assistant",
                 "type": "text",
                 "content": log.response_text,
-                "sources": source_strs,
+                "sources": log.sources_json or [],
                 "timestamp": log.created_at.isoformat() if log.created_at else None,
             })
     return {"messages": messages}
