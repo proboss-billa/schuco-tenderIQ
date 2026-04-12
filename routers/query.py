@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from auth.utils import get_current_user
 from config.models import AVAILABLE_MODELS
 from core.database import get_db
+from models.document import Document
 from models.project import Project
 from models.query_log import QueryLog
 from models.user import User
@@ -61,6 +62,32 @@ async def get_chat_history(
         .order_by(QueryLog.created_at.asc())
         .all()
     )
+
+    # Build filename → document_id lookup for backfilling old sources
+    # that were stored without document_id.
+    doc_rows = (
+        db.query(Document.document_id, Document.original_filename)
+        .filter(Document.project_id == project_id)
+        .all()
+    )
+    fname_to_id = {r.original_filename: str(r.document_id) for r in doc_rows}
+
+    def _enrich_sources(raw_sources):
+        """Ensure every source dict has document_id (backfill from filename)."""
+        if not raw_sources:
+            return []
+        enriched = []
+        for s in raw_sources:
+            if isinstance(s, str):
+                # Legacy string — try to parse out filename for lookup
+                enriched.append(s)
+                continue
+            if isinstance(s, dict) and not s.get("document_id"):
+                doc_name = s.get("document", "")
+                s["document_id"] = fname_to_id.get(doc_name)
+            enriched.append(s)
+        return enriched
+
     messages = []
     for log in logs:
         messages.append({
@@ -74,7 +101,7 @@ async def get_chat_history(
                 "role": "assistant",
                 "type": "text",
                 "content": log.response_text,
-                "sources": log.sources_json or [],
+                "sources": _enrich_sources(log.sources_json),
                 "timestamp": log.created_at.isoformat() if log.created_at else None,
             })
     return {"messages": messages}
