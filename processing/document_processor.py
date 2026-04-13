@@ -434,17 +434,17 @@ class DocumentProcessor:
             # never set), so use `or` to fall through to the document-level default.
             pinecone_vectors.append({
                 "id": vector_id,
-                "values": embedding,
+                "values": [float(v) for v in embedding],
                 "metadata": {
                     "document_id": str(document.document_id),
                     "project_id":  str(self.project_id),
-                    "file_type":   chunk.get("source_type") or document.file_type or "pdf_spec",
-                    "section":     chunk.get("section") or "",
-                    "subsection":  chunk.get("subsection") or "",
-                    "page_start":  chunk.get("page_start") or 0,
-                    "is_table":    chunk.get("is_table", False),
-                    "chunk_level": 1,
-                    "text_preview": (chunk["text"] or "")[:200],
+                    "file_type":   str(chunk.get("source_type") or document.file_type or "pdf_spec"),
+                    "section":     str(chunk.get("section") or ""),
+                    "subsection":  str(chunk.get("subsection") or ""),
+                    "page_start":  float(chunk.get("page_start") or 0),
+                    "is_table":    bool(chunk.get("is_table", False)),
+                    "chunk_level": float(1),
+                    "text_preview": str((chunk["text"] or "")[:200]),
                 },
             })
 
@@ -1037,16 +1037,17 @@ class DocumentProcessor:
 
             pinecone_vectors.append({
                 "id": vector_id,
-                "values": embedding,
+                "values": [float(v) for v in embedding],
                 "metadata": {
                     "document_id": str(document.document_id),
                     "project_id": str(self.project_id),
-                    "file_type": document.file_type or "excel_boq",
-                    "section": section,
-                    "subsection": subsection,
-                    "page_start": 0,
+                    "file_type": str(document.file_type or "excel_boq"),
+                    "section": str(section),
+                    "subsection": str(subsection),
+                    "page_start": float(0),
                     "is_table": True,
-                    "text_preview": text[:200],
+                    "chunk_level": float(1),
+                    "text_preview": str(text[:200]),
                 },
             })
 
