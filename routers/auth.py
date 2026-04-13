@@ -84,8 +84,10 @@ def signup(body: SignupRequest, db: Session = Depends(get_db)):
 @router.post("/login")
 def login(body: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == body.email).first()
-    if not user or not verify_password(body.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found. Please register.")
+    if not verify_password(body.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Incorrect password")
     token = create_access_token({"sub": str(user.user_id)})
     return {
         "access_token": token,
